@@ -148,11 +148,29 @@ kubeStateMetrics:
       memory: "128Mi"
       cpu: "100m"
 
-# 完全禁用 Node Exporter 以节省资源
+# Node Exporter 配置 - 只在有 monitoring=true 标签的节点上运行
 nodeExporter:
-  enabled: false
+  enabled: true
+  
+  # 使用节点选择器限制在特定节点上运行
+  nodeSelector:
+    monitoring: "true"
+    kubernetes.io/os: linux
+  
+  # 容忍所有污点，确保能在标记的节点上调度
+  tolerations:
+    - operator: "Exists"
+  
+  # 优化资源请求
+  resources:
+    requests:
+      memory: "32Mi"
+      cpu: "20m"
+    limits:
+      memory: "64Mi"
+      cpu: "50m"
 
-# 默认规则 - 禁用与 node-exporter 相关的规则
+# 默认规则 - 重新启用节点相关规则
 defaultRules:
   create: true
   rules:
@@ -162,13 +180,13 @@ defaultRules:
     k8s: true
     kubeApiserverAvailability: true
     kubelet: true
-    node: false  # 禁用节点相关规则，因为 node-exporter 被禁用
+    node: true  # 重新启用节点相关规则
     prometheus: true
-    nodeExporter: false  # 显式禁用 node-exporter 规则
-    nodeExporterRecording: false
-    nodeExporterAlerting: false
+    nodeExporter: true  # 重新启用 node-exporter 规则
+    nodeExporterRecording: true
+    nodeExporterAlerting: true
 
-# Operator 配置
+# Operator 配置 - 修复 TLS secret 问题
 prometheusOperator:
   resources:
     requests:
@@ -184,9 +202,21 @@ prometheusOperator:
     tag: "v0.68.0"
     pullPolicy: IfNotPresent
 
-  # 禁用 admission webhook 以加快启动
+  # 启用 admission webhook 以解决 TLS secret 问题
   admissionWebhooks:
-    enabled: false
+    enabled: true
+    # 禁用失败策略，避免 webhook 问题阻塞部署
+    failurePolicy: Ignore
+    # 减少资源请求
+    patch:
+      enabled: true
+      resources:
+        requests:
+          memory: "32Mi"
+          cpu: "20m"
+        limits:
+          memory: "64Mi"
+          cpu: "50m"
 
 # 额外配置 - 确保没有残留的 node-exporter 配置
 extraObjects: []
