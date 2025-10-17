@@ -4,9 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'monitoring/**'
-      - 'charts/**'
-      - 'kubernetes/**'
+      - '**'  # 监控所有文件变化
   workflow_dispatch:
 
 env:
