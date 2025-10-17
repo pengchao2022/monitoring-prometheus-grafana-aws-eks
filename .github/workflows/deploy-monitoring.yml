@@ -61,42 +61,48 @@ jobs:
         kubectl version --client
         helm version
 
-    - name: Cleanup stuck Helm operations
+    - name: Force cleanup stuck Helm operations
       run: |
-        echo "🧹 Cleaning up stuck Helm operations..."
+        echo "🧹 FORCE CLEANUP: Removing all stuck Helm operations..."
         
-        # 等待任何进行中的 Helm 操作完成或超时
-        echo "Waiting for any ongoing Helm operations to complete..."
-        sleep 30
-        
-        # 检查 release 状态
-        if helm status kube-prometheus-stack -n monitoring &>/dev/null; then
-          echo "Release exists, checking status..."
-          helm status kube-prometheus-stack -n monitoring
-          
-          # 尝试回滚任何进行中的操作
-          echo "Attempting to rollback any stuck operations..."
-          helm rollback kube-prometheus-stack -n monitoring --cleanup-on-fail --force 2>/dev/null || echo "Rollback not needed or already completed"
-        fi
-        
-        # 列出所有 Helm secret 并清理被卡住的
-        echo "Checking for stuck Helm secrets..."
-        kubectl get secrets -n monitoring -l owner=helm -o name 2>/dev/null | while read secret; do
-          secret_status=$(kubectl get "$secret" -n monitoring -o jsonpath='{.metadata.labels.status}' 2>/dev/null || echo "unknown")
-          if [ "$secret_status" = "pending" ] || [ "$secret_status" = "uninstalling" ]; then
-            echo "Deleting stuck secret: $secret (status: $secret_status)"
-            kubectl delete "$secret" -n monitoring --ignore-not-found=true
+        # 方法1: 检查并删除所有进行中的 Helm secret
+        echo "=== Deleting all Helm secrets with pending status ==="
+        kubectl get secrets -n monitoring -l owner=helm -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | while read secret; do
+          status=$(kubectl get secret "$secret" -n monitoring -o jsonpath='{.metadata.labels.status}' 2>/dev/null || echo "unknown")
+          echo "Secret: $secret (status: $status)"
+          if [ "$status" = "pending" ] || [ "$status" = "uninstalling" ] || [ "$status" = "superseded" ]; then
+            echo "🚨 DELETING stuck secret: $secret"
+            kubectl delete secret "$secret" -n monitoring --ignore-not-found=true
           fi
         done
         
-        # 强制删除任何残留的 Helm 操作
-        echo "Force cleaning any remaining Helm operations..."
-        helm list -n monitoring --pending --output json 2>/dev/null | jq -r '.[].name' 2>/dev/null | while read release; do
-          echo "Force cleaning release: $release"
-          helm rollback "$release" -n monitoring --cleanup-on-fail --force 2>/dev/null || true
-        done
+        # 方法2: 强制删除所有 Helm 相关 secret（更激进）
+        echo "=== Force deleting ALL Helm secrets in monitoring namespace ==="
+        kubectl delete secrets -n monitoring -l owner=helm --ignore-not-found=true
         
-        echo "✅ Helm cleanup completed"
+        # 方法3: 检查 release 状态并强制清理
+        echo "=== Checking Helm release status ==="
+        if helm status kube-prometheus-stack -n monitoring &>/dev/null; then
+          echo "Release exists, getting detailed status..."
+          helm status kube-prometheus-stack -n monitoring
+          
+          echo "🚨 FORCE DELETING the release..."
+          helm uninstall kube-prometheus-stack -n monitoring --wait --timeout 5m 2>/dev/null || \
+          helm delete kube-prometheus-stack -n monitoring 2>/dev/null || \
+          echo "Release deletion attempted"
+        else
+          echo "No existing release found"
+        fi
+        
+        # 方法4: 清理任何残留的配置
+        echo "=== Cleaning up any remaining resources ==="
+        kubectl delete daemonset -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --ignore-not-found=true
+        kubectl delete pods -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --ignore-not-found=true
+        kubectl delete deployment -n monitoring -l app=kube-prometheus-stack-operator --ignore-not-found=true
+        
+        # 等待确保清理完成
+        sleep 10
+        echo "✅ Force cleanup completed"
 
     - name: Pre-deployment cluster check
       run: |
@@ -163,6 +169,10 @@ jobs:
         echo "🚀 Starting kube-prometheus-stack installation..."
         echo "Start time: $(date)"
         
+        # 首先检查是否还有进行中的操作
+        echo "=== Checking for any remaining stuck operations ==="
+        kubectl get secrets -n monitoring -l owner=helm -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels.status}{"\n"}{end}' 2>/dev/null || echo "No Helm secrets found"
+        
         # 设置安装超时和重试逻辑
         max_attempts=3
         attempt=1
@@ -189,6 +199,9 @@ jobs:
             if [ $attempt -lt $max_attempts ]; then
               echo "Waiting 30 seconds before retry..."
               sleep 30
+              # 每次重试前再次清理
+              echo "Cleaning up before retry..."
+              kubectl delete secrets -n monitoring -l owner=helm --ignore-not-found=true
             fi
           fi
           attempt=$((attempt + 1))
@@ -379,6 +392,7 @@ jobs:
           echo "2. 集群资源不足"
           echo "3. 网络问题导致镜像拉取失败"
           echo "4. 存储类配置问题"
+          echo "5. Helm 操作被卡住（需要手动清理）"
           echo ""
           echo "请检查上面的日志了解具体错误信息。"
         fi
