@@ -261,28 +261,51 @@ jobs:
 
     - name: Create deployment summary
       if: always()
-      uses: actions/github-script@v6
+      run: |
+        # 使用简单的 echo 输出部署结果，避免 github-script 的问题
+        HELM_STATUS="${{ steps.helm-deploy.outputs.helm_status }}"
+        GRAFANA_ALB="${{ steps.endpoints.outputs.grafana_alb }}"
+        PROMETHEUS_ALB="${{ steps.endpoints.outputs.prometheus_alb }}"
+        ALERTMANAGER_ALB="${{ steps.endpoints.outputs.alertmanager_alb }}"
+        
+        echo "=========================================="
+        echo "         DEPLOYMENT SUMMARY"
+        echo "=========================================="
+        
+        if [ "$HELM_STATUS" = "success" ]; then
+          echo "🎉 Monitoring Stack with ALB 部署完成!"
+          echo ""
+          echo "ALB 访问地址:"
+          echo "📊 Grafana: http://$GRAFANA_ALB"
+          echo "📈 Prometheus: http://$PROMETHEUS_ALB" 
+          echo "🚨 Alertmanager: http://$ALERTMANAGER_ALB"
+          echo ""
+          echo "登录信息:"
+          echo "Grafana 用户名: ${{ secrets.GRAFANA_ADMIN_USER }}"
+          echo "Grafana 密码: [已设置]"
+          echo ""
+          echo "下一步:"
+          echo "1. 等待 ALB DNS 传播（可能需要几分钟）"
+          echo "2. 在浏览器中访问上述 URL"
+          echo "3. 根据需要配置额外的仪表板和告警"
+        else
+          echo "❌ Monitoring Stack 部署失败"
+          echo ""
+          echo "可能的原因:"
+          echo "1. Helm 安装超时"
+          echo "2. 集群资源不足"
+          echo "3. 网络问题导致镜像拉取失败"
+          echo "4. 存储类配置问题"
+          echo ""
+          echo "请检查上面的日志了解具体错误信息。"
+        fi
+        echo "=========================================="
+
+    - name: Upload deployment logs
+      if: always()
+      uses: actions/upload-artifact@v4
       with:
-        script: |
-          const helmStatus = '${{ steps.helm-deploy.outputs.helm_status }}';
-          const grafanaAlb = '${{ steps.endpoints.outputs.grafana_alb }}';
-          const prometheusAlb = '${{ steps.endpoints.outputs.prometheus_alb }}';
-          const alertmanagerAlb = '${{ steps.endpoints.outputs.alertmanager_alb }}';
-          
-          let statusMessage = '';
-          let details = '';
-          
-          if (helmStatus === 'success') {
-            statusMessage = '🎉 Monitoring Stack with ALB 部署完成!';
-            details = `**ALB 访问地址:**\n- 📊 Grafana: http://${grafanaAlb}\n- 📈 Prometheus: http://${prometheusAlb}\n- 🚨 Alertmanager: http://${alertmanagerAlb}\n\n**登录信息:**\n- Grafana 用户名: \`${{ secrets.GRAFANA_ADMIN_USER }}\`\n- Grafana 密码: \`${{ secrets.GRAFANA_ADMIN_PASSWORD }}\``;
-          } else {
-            statusMessage = '❌ Monitoring Stack 部署失败';
-            details = 'Helm 安装过程中出现错误。请检查 GitHub Actions 日志了解具体原因。';
-          }
-          
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: `${statusMessage}\n\n${details}`
-          });
+        name: deployment-logs
+        path: |
+          ${{ github.workspace }}/**/*.log
+        retention-days: 7
