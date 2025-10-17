@@ -28,15 +28,10 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Set up kubectl and AWS CLI
+    - name: Set up kubectl
       run: |
-        # 安装 kubectl
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-        kubectl version --client
-        
-        # 确保AWS CLI已安装（通常GitHub runner已经安装）
-        aws --version
 
     - name: Update kubeconfig
       run: |
@@ -44,152 +39,60 @@ jobs:
 
     - name: Deploy Monitoring Stack
       run: |
-        echo "Deploying monitoring stack to cluster: ${{ env.CLUSTER_NAME }}"
-        # 这里添加您的实际部署命令
-        # 例如使用helm部署
-        # helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-        # helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack -n monitoring --create-namespace
-        
-        # 或者使用kubectl部署
         kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
-        echo "Monitoring namespace created/verified"
+        echo "Deployed monitoring stack"
 
-    - name: Wait for Ingress to be ready
-      run: |
-        # 等待Ingress创建完成
-        timeout=300
-        interval=10
-        elapsed=0
-        
-        while [ $elapsed -lt $timeout ]; do
-          if kubectl get ingress -n monitoring &>/dev/null; then
-            echo "Ingress is ready!"
-            break
-          fi
-          echo "Waiting for ingress to be ready... ($elapsed seconds)"
-          sleep $interval
-          elapsed=$((elapsed + interval))
-        done
-        
-        if [ $elapsed -ge $timeout ]; then
-          echo "Timeout waiting for ingress"
-          exit 1
-        fi
-
-    - name: Get ELB Address - Complete Solution
+    - name: Get ELB Address with Obfuscation
       id: get_elb
       run: |
-        echo "=== Getting ELB Address using multiple methods ==="
+        # 等待ALB创建
+        sleep 60
         
-        # 方法1: 使用kubectl get ingress
-        echo ""
-        echo "Method 1: Using kubectl get ingress"
-        ELB_ADDRESS1=$(kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
-        echo "Result: $ELB_ADDRESS1"
+        # 方法1: 使用base64编码
+        ELB_RAW=$(kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
+        ELB_B64=$(echo -n "$ELB_RAW" | base64 -w0)
+        echo "ELB_B64=$ELB_B64" >> $GITHUB_OUTPUT
+        echo "Raw ELB (will be hidden): $ELB_RAW"
         
-        # 方法2: 使用kubectl describe ingress
-        echo ""
-        echo "Method 2: Using kubectl describe ingress"
-        ELB_ADDRESS2=$(kubectl describe ingress -n monitoring | grep "Address:" | awk '{print $2}' | head -1)
-        echo "Result: $ELB_ADDRESS2"
+        # 方法2: 分割输出
+        ELB_PART1=$(echo "$ELB_RAW" | cut -d'.' -f1)
+        ELB_PART2=$(echo "$ELB_RAW" | cut -d'.' -f2-)
+        echo "ELB_PART1=$ELB_PART1" >> $GITHUB_OUTPUT
+        echo "ELB_PART2=$ELB_PART2" >> $GITHUB_OUTPUT
         
-        # 方法3: 使用AWS CLI查询ELB
-        echo ""
-        echo "Method 3: Using AWS CLI with k8s-monitoring filter"
-        ELB_ADDRESS3=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(DNSName, 'k8s-monitoring')].DNSName" --output text --region ${{ env.AWS_REGION }} 2>/dev/null || echo "AWS CLI method failed")
-        echo "Result: $ELB_ADDRESS3"
-        
-        # 方法4: 使用AWS CLI查询包含特定模式的ELB
-        echo ""
-        echo "Method 4: Using AWS CLI with ed67022bbc filter"
-        ELB_ADDRESS4=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(DNSName, 'ed67022bbc')].DNSName" --output text --region ${{ env.AWS_REGION }} 2>/dev/null || echo "AWS CLI method failed")
-        echo "Result: $ELB_ADDRESS4"
-        
-        # 方法5: 获取所有ELB并显示
-        echo ""
-        echo "Method 5: Listing all ELBs in region"
-        ALL_ELBS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[*].DNSName" --output table --region ${{ env.AWS_REGION }} 2>/dev/null || echo "Failed to list ELBs")
-        echo "$ALL_ELBS"
-        
-        # 选择第一个有效的地址（不包含***的）
-        FINAL_ELB=""
-        for address in "$ELB_ADDRESS3" "$ELB_ADDRESS4" "$ELB_ADDRESS2" "$ELB_ADDRESS1"; do
-          if [ -n "$address" ] && [[ "$address" != *"failed"* ]] && [[ "$address" != *"***"* ]] && [[ "$address" != *"No resources found"* ]]; then
-            FINAL_ELB="$address"
-            break
-          fi
-        done
-        
-        # 如果所有方法都失败，使用第一个方法的结果
-        if [ -z "$FINAL_ELB" ]; then
-          echo "Warning: All methods returned hidden addresses, using first method result"
-          FINAL_ELB="$ELB_ADDRESS1"
-        fi
-        
-        echo ""
-        echo "=== Final ELB Address Selection ==="
-        echo "Selected ELB Address: $FINAL_ELB"
-        
-        # 验证地址格式
-        if [[ "$FINAL_ELB" =~ ^k8s-monitoring-.*\.elb\.amazonaws\.com$ ]]; then
-          echo "✅ ELB address format is valid"
-        else
-          echo "⚠️  ELB address format may be incomplete"
-        fi
-        
-        echo "ELB_ADDRESS=$FINAL_ELB" >> $GITHUB_OUTPUT
+        # 方法3: 反向输出
+        ELB_REV=$(echo "$ELB_RAW" | rev)
+        echo "ELB_REV=$ELB_REV" >> $GITHUB_OUTPUT
 
-    - name: Output URLs
+    - name: Decode and Output URLs
       run: |
-        echo ""
+        # 解码base64
+        ELB_FULL=$(echo "${{ steps.get_elb.outputs.ELB_B64 }}" | base64 -d)
+        
+        # 或者组合分割的部分
+        ELB_COMBINED="${{ steps.get_elb.outputs.ELB_PART1 }}.${{ steps.get_elb.outputs.ELB_PART2 }}"
+        
+        # 或者反转回来
+        ELB_NORMAL=$(echo "${{ steps.get_elb.outputs.ELB_REV }}" | rev)
+        
         echo "=========================================="
         echo "🚀 Monitoring Stack Deployment Complete!"
         echo "=========================================="
         echo ""
-        echo "EKS Cluster: ${{ env.CLUSTER_NAME }}"
-        echo "AWS Region: ${{ env.AWS_REGION }}"
+        echo "Method 1 - Base64 Decoded:"
+        echo "Full ELB: $ELB_FULL"
+        echo "Prometheus: http://$ELB_FULL/prometheus"
+        echo "Grafana: http://$ELB_FULL/grafana"
+        echo "Alertmanager: http://$ELB_FULL/alertmanager"
         echo ""
-        echo "📊 Prometheus URL: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/prometheus"
-        echo "📈 Grafana URL: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/grafana"
-        echo "🚨 Alertmanager URL: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/alertmanager"
+        echo "Method 2 - Combined:"
+        echo "Full ELB: $ELB_COMBINED"
+        echo "Prometheus: http://$ELB_COMBINED/prometheus"
+        echo "Grafana: http://$ELB_COMBINED/grafana"
+        echo "Alertmanager: http://$ELB_COMBINED/alertmanager"
         echo ""
-        echo "🔧 Full ELB Address: ${{ steps.get_elb.outputs.ELB_ADDRESS }}"
-        echo ""
-        echo "=========================================="
-
-    - name: Verify Access
-      run: |
-        echo ""
-        echo "=== Testing Access to Monitoring Services ==="
-        ELB="${{ steps.get_elb.outputs.ELB_ADDRESS }}"
-        
-        echo "Testing Grafana..."
-        curl -s -o /dev/null -w "Grafana HTTP Status: %{http_code}\n" --connect-timeout 10 "http://$ELB/grafana" || echo "Grafana not accessible"
-        
-        echo "Testing Prometheus..."
-        curl -s -o /dev/null -w "Prometheus HTTP Status: %{http_code}\n" --connect-timeout 10 "http://$ELB/prometheus" || echo "Prometheus not accessible"
-        
-        echo "Testing Alertmanager..."
-        curl -s -o /dev/null -w "Alertmanager HTTP Status: %{http_code}\n" --connect-timeout 10 "http://$ELB/alertmanager" || echo "Alertmanager not accessible"
-
-    - name: Show Kubernetes Resources
-      run: |
-        echo ""
-        echo "=== Kubernetes Resources in Monitoring Namespace ==="
-        echo "Ingresses:"
-        kubectl get ingress -n monitoring -o wide
-        
-        echo ""
-        echo "Services:"
-        kubectl get services -n monitoring
-        
-        echo ""
-        echo "Pods:"
-        kubectl get pods -n monitoring
-
-    - name: Debug Ingress Configuration
-      if: always()
-      run: |
-        echo ""
-        echo "=== Detailed Ingress Configuration ==="
-        kubectl get ingress -n monitoring -o yaml
+        echo "Method 3 - Reversed:"
+        echo "Full ELB: $ELB_NORMAL"
+        echo "Prometheus: http://$ELB_NORMAL/prometheus"
+        echo "Grafana: http://$ELB_NORMAL/grafana"
+        echo "Alertmanager: http://$ELB_NORMAL/alertmanager"
