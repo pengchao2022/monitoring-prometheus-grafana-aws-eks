@@ -6,7 +6,7 @@ on:
     paths:
       - 'charts/**'
       - 'kubernetes/**'
-      - '.github/workflows/deploy-monitoring.yml'
+      - '.github/workflows/deploy-monitoring.yml'  # 修正为实际文件名
   workflow_dispatch:
     inputs:
       environment:
@@ -99,6 +99,17 @@ jobs:
           --from-literal=admin-password=${{ secrets.GRAFANA_ADMIN_PASSWORD }} \
           --dry-run=client -o yaml | kubectl apply -f -
 
+    - name: Cleanup existing node-exporters
+      run: |
+        echo "🧹 Cleaning up existing node-exporters..."
+        # 删除现有的 node-exporter DaemonSet
+        kubectl delete daemonset kube-prometheus-stack-prometheus-node-exporter -n monitoring --ignore-not-found=true
+        
+        # 删除 pending 的 node-exporter pods
+        kubectl delete pod -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --field-selector=status.phase=Pending --ignore-not-found=true
+        
+        echo "✅ Cleanup completed"
+
     - name: Add Helm repositories
       run: |
         helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
@@ -183,8 +194,12 @@ jobs:
         echo "=== Detailed Pod Diagnostics ==="
         kubectl get pods -n ${{ env.NAMESPACE }} -o wide
         
+        # 检查 node-exporter 数量
+        echo "=== Node-Exporter Count ==="
+        kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=prometheus-node-exporter --no-headers | wc -l || echo "0"
+        
         # 检查 Pod 详细状态
-        for pod in $(kubectl get pods -n ${{ env.NAMESPACE }} --no-headers -o custom-columns=":metadata.name"); do
+        for pod in $(kubectl get pods -n ${{ env.NAMESPACE }} --no-headers -o custom-columns=":metadata.name" | head -5); do
           echo "--- Diagnosing pod: $pod ---"
           kubectl describe pod $pod -n ${{ env.NAMESPACE }} | grep -A 10 "Events:" || echo "No events found"
         done

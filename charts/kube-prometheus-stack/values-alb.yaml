@@ -150,13 +150,32 @@ kubeStateMetrics:
 
 nodeExporter:
   enabled: true
+  
+  # 限制为2个副本，避免占用过多资源
+  replicaCount: 2
+  
+  # 优化资源请求
   resources:
     requests:
+      memory: "32Mi"
+      cpu: "20m"
+    limits:
       memory: "64Mi"
       cpu: "50m"
-    limits:
-      memory: "128Mi"
-      cpu: "100m"
+  
+  # 添加亲和性配置，避免在同一节点上调度多个副本
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+            - key: app.kubernetes.io/name
+              operator: In
+              values:
+              - node-exporter
+          topologyKey: kubernetes.io/hostname
 
 # 默认规则
 defaultRules:
