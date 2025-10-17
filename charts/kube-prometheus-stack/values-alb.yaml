@@ -195,12 +195,6 @@ prometheusOperator:
     limits:
       memory: "128Mi"
       cpu: "100m"
-  
-  # 优化镜像配置
-  image:
-    repository: prometheus-operator/prometheus-operator
-    tag: "v0.68.0"
-    pullPolicy: IfNotPresent
 
   # 启用 admission webhook 以解决 TLS secret 问题
   admissionWebhooks:
