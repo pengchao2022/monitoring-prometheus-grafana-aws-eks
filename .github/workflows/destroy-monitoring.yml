@@ -52,12 +52,12 @@ jobs:
     - name: Uninstall Helm releases
       run: |
         echo "🗑️ Uninstalling Helm releases..."
-        helm uninstall kube-prometheus-stack -n ${{ env.NAMESPACE }} --ignore-not-found=true
+        helm uninstall kube-prometheus-stack -n ${{ env.NAMESPACE }} --ignore-not-found=true || true
 
     - name: Delete Ingress resources
       run: |
         echo "🗑️ Deleting Ingress resources (this will delete ALB)..."
-        kubectl delete -f kubernetes/ingress/ -n ${{ env.NAMESPACE }} --ignore-not-found=true
+        kubectl delete -f kubernetes/ingress/ -n ${{ env.NAMESPACE }} --ignore-not-found=true || true
 
     - name: Wait for resource cleanup
       run: |
@@ -67,15 +67,15 @@ jobs:
     - name: Cleanup PVCs and secrets
       run: |
         echo "🗑️ Cleaning up Persistent Volume Claims..."
-        kubectl delete pvc -n ${{ env.NAMESPACE }} --all --ignore-not-found=true
+        kubectl delete pvc -n ${{ env.NAMESPACE }} --all --ignore-not-found=true || true
         
         echo "🗑️ Cleaning up secrets..."
-        kubectl delete secret grafana-admin-secret -n ${{ env.NAMESPACE }} --ignore-not-found=true
+        kubectl delete secret grafana-admin-secret -n ${{ env.NAMESPACE }} --ignore-not-found=true || true
 
     - name: Delete namespace
       run: |
         echo "🗑️ Deleting namespace..."
-        kubectl delete namespace ${{ env.NAMESPACE }} --ignore-not-found=true
+        kubectl delete namespace ${{ env.NAMESPACE }} --ignore-not-found=true || true
 
     - name: Confirm deletion
       run: |
@@ -86,15 +86,21 @@ jobs:
 
     - name: Create cleanup summary
       if: always()
-      uses: actions/github-script@v6
-      with:
-        script: |
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: `🧹 Monitoring Stack 清理完成!\n\n所有资源已从集群中删除:\n- Helm releases\n- Ingress resources (ALB)\n- Persistent Volume Claims\n- Secrets\n- Namespace\n\n如需重新部署，请再次运行部署工作流。`
-          });
+      run: |
+        echo "=========================================="
+        echo "         CLEANUP SUMMARY"
+        echo "=========================================="
+        echo "🧹 Monitoring Stack 清理完成!"
+        echo ""
+        echo "所有资源已从集群中删除:"
+        echo "- Helm releases"
+        echo "- Ingress resources (ALB)" 
+        echo "- Persistent Volume Claims"
+        echo "- Secrets"
+        echo "- Namespace"
+        echo ""
+        echo "如需重新部署，请再次运行部署工作流。"
+        echo "=========================================="
 
   pre-destroy-check:
     runs-on: ubuntu-latest
