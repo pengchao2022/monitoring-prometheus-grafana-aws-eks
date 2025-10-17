@@ -42,57 +42,94 @@ jobs:
         kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
         echo "Deployed monitoring stack"
 
-    - name: Get ELB Address with Obfuscation
-      id: get_elb
+    - name: Wait for ALB
       run: |
-        # 等待ALB创建
-        sleep 60
-        
-        # 方法1: 使用base64编码
-        ELB_RAW=$(kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
-        ELB_B64=$(echo -n "$ELB_RAW" | base64 -w0)
-        echo "ELB_B64=$ELB_B64" >> $GITHUB_OUTPUT
-        echo "Raw ELB (will be hidden): $ELB_RAW"
-        
-        # 方法2: 分割输出
-        ELB_PART1=$(echo "$ELB_RAW" | cut -d'.' -f1)
-        ELB_PART2=$(echo "$ELB_RAW" | cut -d'.' -f2-)
-        echo "ELB_PART1=$ELB_PART1" >> $GITHUB_OUTPUT
-        echo "ELB_PART2=$ELB_PART2" >> $GITHUB_OUTPUT
-        
-        # 方法3: 反向输出
-        ELB_REV=$(echo "$ELB_RAW" | rev)
-        echo "ELB_REV=$ELB_REV" >> $GITHUB_OUTPUT
+        echo "Waiting for ALB to be ready..."
+        for i in {1..30}; do
+          if kubectl get ingress -n monitoring &>/dev/null; then
+            ELB_EXISTS=$(kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "not-ready")
+            if [[ "$ELB_EXISTS" != "not-ready" ]] && [[ -n "$ELB_EXISTS" ]]; then
+              echo "ALB is ready!"
+              break
+            fi
+          fi
+          echo "Waiting... ($i/30)"
+          sleep 10
+        done
 
-    - name: Decode and Output URLs
+    - name: Create Access Info Files
       run: |
-        # 解码base64
-        ELB_FULL=$(echo "${{ steps.get_elb.outputs.ELB_B64 }}" | base64 -d)
+        # 获取ELB地址
+        ELB_ADDRESS=$(kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
         
-        # 或者组合分割的部分
-        ELB_COMBINED="${{ steps.get_elb.outputs.ELB_PART1 }}.${{ steps.get_elb.outputs.ELB_PART2 }}"
+        # 创建详细的访问信息文件
+        cat > ACCESS_INFO.md << EOF
+        # Monitoring Stack Access Information
         
-        # 或者反转回来
-        ELB_NORMAL=$(echo "${{ steps.get_elb.outputs.ELB_REV }}" | rev)
+        ## ELB Address
+        $ELB_ADDRESS
         
+        ## Access URLs
+        - Prometheus: http://$ELB_ADDRESS/prometheus
+        - Grafana: http://$ELB_ADDRESS/grafana  
+        - Alertmanager: http://$ELB_ADDRESS/alertmanager
+        
+        ## Quick Access Commands
+        \`\`\`bash
+        # Test Grafana access
+        curl -v http://$ELB_ADDRESS/grafana
+        
+        # Test Prometheus access  
+        curl -v http://$ELB_ADDRESS/prometheus
+        
+        # Get ELB address (if needed again)
+        kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}'
+        \`\`\`
+        
+        ## Deployment Info
+        - Cluster: ${{ env.CLUSTER_NAME }}
+        - Region: ${{ env.AWS_REGION }}
+        - Timestamp: $(date)
+        EOF
+        
+        # 创建简单的环境变量文件
+        cat > urls.txt << EOF
+        ELB_ADDRESS=$ELB_ADDRESS
+        PROMETHEUS_URL=http://$ELB_ADDRESS/prometheus
+        GRAFANA_URL=http://$ELB_ADDRESS/grafana
+        ALERTMANAGER_URL=http://$ELB_ADDRESS/alertmanager
+        EOF
+        
+        echo "Access information files created"
+
+    - name: Upload Access Info as Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: monitoring-access-info
+        path: |
+          ACCESS_INFO.md
+          urls.txt
+        retention-days: 30
+
+    - name: Final Instructions
+      run: |
         echo "=========================================="
-        echo "🚀 Monitoring Stack Deployment Complete!"
+        echo "✅ DEPLOYMENT COMPLETE"
         echo "=========================================="
         echo ""
-        echo "Method 1 - Base64 Decoded:"
-        echo "Full ELB: $ELB_FULL"
-        echo "Prometheus: http://$ELB_FULL/prometheus"
-        echo "Grafana: http://$ELB_FULL/grafana"
-        echo "Alertmanager: http://$ELB_FULL/alertmanager"
+        echo "📥 DOWNLOAD ACCESS INFORMATION:"
+        echo "1. Go to this workflow run in GitHub"
+        echo "2. Scroll down to the 'Artifacts' section"  
+        echo "3. Download 'monitoring-access-info'"
+        echo "4. Open ACCESS_INFO.md for complete details"
         echo ""
-        echo "Method 2 - Combined:"
-        echo "Full ELB: $ELB_COMBINED"
-        echo "Prometheus: http://$ELB_COMBINED/prometheus"
-        echo "Grafana: http://$ELB_COMBINED/grafana"
-        echo "Alertmanager: http://$ELB_COMBINED/alertmanager"
+        echo "🔗 ALTERNATIVE: Get ELB address locally with:"
+        echo "kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}'"
         echo ""
-        echo "Method 3 - Reversed:"
-        echo "Full ELB: $ELB_NORMAL"
-        echo "Prometheus: http://$ELB_NORMAL/prometheus"
-        echo "Grafana: http://$ELB_NORMAL/grafana"
-        echo "Alertmanager: http://$ELB_NORMAL/alertmanager"
+        echo "🌐 ACCESS YOUR DASHBOARDS:"
+        echo "After getting the ELB address, use:"
+        echo "- /grafana for Grafana"
+        echo "- /prometheus for Prometheus" 
+        echo "- /alertmanager for Alertmanager"
+        echo ""
+        echo "=========================================="
