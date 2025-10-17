@@ -52,7 +52,7 @@ jobs:
         chmod +x kubectl
         sudo mv kubectl /usr/local/bin/
         
-        # 安装 Helm（修复引号问题）
+        # 安装 Helm
         curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
         chmod 700 get_helm.sh
         ./get_helm.sh
@@ -105,7 +105,7 @@ jobs:
         helm repo update
 
     - name: Deploy kube-prometheus-stack with timeout
-      id: helm-install
+      id: helm-deploy
       run: |
         echo "🚀 Starting kube-prometheus-stack installation..."
         echo "Start time: $(date)"
@@ -113,6 +113,7 @@ jobs:
         # 设置安装超时和重试逻辑
         max_attempts=3
         attempt=1
+        success=false
         
         while [ $attempt -le $max_attempts ]; do
           echo "Attempt $attempt of $max_attempts..."
@@ -128,19 +129,23 @@ jobs:
             --create-namespace; then
             
             echo "✅ Helm installation successful on attempt $attempt"
-            echo "success" > /tmp/helm-status
+            success=true
             break
           else
             echo "❌ Helm installation failed on attempt $attempt"
             if [ $attempt -lt $max_attempts ]; then
               echo "Waiting 30 seconds before retry..."
               sleep 30
-            else
-              echo "error" > /tmp/helm-status
             fi
           fi
           attempt=$((attempt + 1))
         done
+        
+        if [ "$success" = true ]; then
+          echo "helm_status=success" >> $GITHUB_OUTPUT
+        else
+          echo "helm_status=failed" >> $GITHUB_OUTPUT
+        fi
         
         echo "Completion time: $(date)"
 
@@ -158,10 +163,6 @@ jobs:
           
           echo "Events:"
           kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp --field-selector type=Warning 2>/dev/null | tail -3 || echo "No warning events"
-          
-          # 检查镜像拉取状态
-          echo "Image Pull Status:"
-          kubectl get pods -n ${{ env.NAMESPACE }} -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{range .status.containerStatuses[*]}{.state.waiting.reason}{" "}{.state.waiting.message}{"\t"}{end}{"\n"}{end}' 2>/dev/null || echo "Cannot get detailed status"
           
           if [ $i -lt 6 ]; then
             sleep 20
@@ -201,41 +202,49 @@ jobs:
         kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp | tail -15
 
     - name: Deploy Ingress resources
-      if: success()
+      if: steps.helm-deploy.outputs.helm_status == 'success'
       run: |
         echo "🚀 Deploying Ingress resources..."
         kubectl apply -f kubernetes/ingress/ -n ${{ env.NAMESPACE }}
 
     - name: Wait for ALB provisioning
-      if: success()
+      if: steps.helm-deploy.outputs.helm_status == 'success'
       run: |
         echo "⏳ Waiting for ALB provisioning..."
         
         # 等待 ALB 创建，带超时
-        timeout 300s bash -c '
-          while true; do
-            ALB_HOSTNAME=$(kubectl get ingress grafana-ingress -n ${{ env.NAMESPACE }} -o jsonpath="{.status.loadBalancer.ingress[0].hostname}" 2>/dev/null)
-            if [ -n "$ALB_HOSTNAME" ]; then
-              echo "✅ ALB provisioned: $ALB_HOSTNAME"
-              break
-            fi
-            echo "Waiting for ALB... (current time: $(date))"
-            sleep 30
-          done
-        '
+        max_wait=300
+        wait_time=0
+        alb_provisioned=false
+        
+        while [ $wait_time -lt $max_wait ]; do
+          ALB_HOSTNAME=$(kubectl get ingress grafana-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+          if [ -n "$ALB_HOSTNAME" ]; then
+            echo "✅ ALB provisioned: $ALB_HOSTNAME"
+            alb_provisioned=true
+            break
+          fi
+          echo "Waiting for ALB... (elapsed: ${wait_time}s)"
+          sleep 30
+          wait_time=$((wait_time + 30))
+        done
+        
+        if [ "$alb_provisioned" = false ]; then
+          echo "❌ ALB provisioning timeout after ${max_wait}s"
+        fi
         
         echo "ALB Status:"
         kubectl get ingress -n ${{ env.NAMESPACE }}
 
     - name: Final health check
-      if: success()
+      if: steps.helm-deploy.outputs.helm_status == 'success'
       run: |
         echo "🏥 Running final health check..."
         chmod +x scripts/health-check.sh
         ./scripts/health-check.sh
 
     - name: Get ALB endpoints
-      if: success()
+      if: steps.helm-deploy.outputs.helm_status == 'success'
       id: endpoints
       run: |
         GRAFANA_ALB=$(kubectl get ingress grafana-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
@@ -255,7 +264,7 @@ jobs:
       uses: actions/github-script@v6
       with:
         script: |
-          const success = '${{ success() }}';
+          const helmStatus = '${{ steps.helm-deploy.outputs.helm_status }}';
           const grafanaAlb = '${{ steps.endpoints.outputs.grafana_alb }}';
           const prometheusAlb = '${{ steps.endpoints.outputs.prometheus_alb }}';
           const alertmanagerAlb = '${{ steps.endpoints.outputs.alertmanager_alb }}';
@@ -263,12 +272,12 @@ jobs:
           let statusMessage = '';
           let details = '';
           
-          if (success === 'true') {
+          if (helmStatus === 'success') {
             statusMessage = '🎉 Monitoring Stack with ALB 部署完成!';
             details = `**ALB 访问地址:**\n- 📊 Grafana: http://${grafanaAlb}\n- 📈 Prometheus: http://${prometheusAlb}\n- 🚨 Alertmanager: http://${alertmanagerAlb}\n\n**登录信息:**\n- Grafana 用户名: \`${{ secrets.GRAFANA_ADMIN_USER }}\`\n- Grafana 密码: \`${{ secrets.GRAFANA_ADMIN_PASSWORD }}\``;
           } else {
             statusMessage = '❌ Monitoring Stack 部署失败';
-            details = '部署过程中出现错误。请检查 GitHub Actions 日志了解具体原因。';
+            details = 'Helm 安装过程中出现错误。请检查 GitHub Actions 日志了解具体原因。';
           }
           
           github.rest.issues.createComment({
