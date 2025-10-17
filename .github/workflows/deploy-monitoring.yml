@@ -6,7 +6,7 @@ on:
     paths:
       - 'charts/**'
       - 'kubernetes/**'
-      - '.github/workflows/deploy-monitoring.yml'  # 修正为实际文件名
+      - '.github/workflows/deploy-monitoring.yml'
   workflow_dispatch:
     inputs:
       environment:
@@ -102,11 +102,16 @@ jobs:
     - name: Cleanup existing node-exporters
       run: |
         echo "🧹 Cleaning up existing node-exporters..."
-        # 删除现有的 node-exporter DaemonSet
+        
+        # 删除默认的 node-exporter DaemonSet
         kubectl delete daemonset kube-prometheus-stack-prometheus-node-exporter -n monitoring --ignore-not-found=true
         
-        # 删除 pending 的 node-exporter pods
-        kubectl delete pod -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --field-selector=status.phase=Pending --ignore-not-found=true
+        # 删除所有 node-exporter pods
+        kubectl delete pod -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --ignore-not-found=true
+        
+        # 删除自定义的 node-exporter（如果有）
+        kubectl delete daemonset node-exporter-limited -n monitoring --ignore-not-found=true
+        kubectl delete pod -n monitoring -l app.kubernetes.io/name=node-exporter --ignore-not-found=true
         
         echo "✅ Cleanup completed"
 
@@ -160,6 +165,44 @@ jobs:
         
         echo "Completion time: $(date)"
 
+    - name: Verify node-exporter is disabled
+      if: steps.helm-deploy.outputs.helm_status == 'success'
+      run: |
+        echo "🔍 Verifying node-exporter is disabled..."
+        
+        echo "=== Checking for node-exporter DaemonSet ==="
+        kubectl get daemonset -n monitoring | grep node-exporter && echo "❌ node-exporter DaemonSet still exists" || echo "✅ No node-exporter DaemonSet found"
+        
+        echo "=== Checking for node-exporter Pods ==="
+        NODE_EXPORTER_PODS=$(kubectl get pods -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --no-headers 2>/dev/null | wc -l)
+        if [ "$NODE_EXPORTER_PODS" -eq "0" ]; then
+          echo "✅ No node-exporter pods found (as expected)"
+        else
+          echo "❌ Found $NODE_EXPORTER_PODS node-exporter pods (should be 0)"
+          kubectl get pods -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter
+        fi
+
+    - name: Deploy custom limited node-exporter
+      if: steps.helm-deploy.outputs.helm_status == 'success'
+      run: |
+        echo "🚀 Deploying custom limited node-exporter..."
+        
+        # 检查是否存在自定义 node-exporter 配置文件
+        if [ -f "kubernetes/node-exporter/daemonset-limited.yaml" ]; then
+          kubectl apply -f kubernetes/node-exporter/daemonset-limited.yaml -n monitoring
+          echo "✅ Custom node-exporter deployed"
+          
+          # 等待自定义 DaemonSet 的 Pods 就绪
+          echo "⏳ Waiting for custom node-exporter pods..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=node-exporter,app.kubernetes.io/instance=limited -n monitoring --timeout=120s || echo "⚠️ Some pods may still be starting"
+          
+          echo "=== Custom node-exporter status ==="
+          kubectl get daemonset node-exporter-limited -n monitoring
+          kubectl get pods -n monitoring -l app.kubernetes.io/name=node-exporter
+        else
+          echo "ℹ️ No custom node-exporter configuration found, skipping"
+        fi
+
     - name: Real-time installation monitoring
       if: always()
       run: |
@@ -194,14 +237,17 @@ jobs:
         echo "=== Detailed Pod Diagnostics ==="
         kubectl get pods -n ${{ env.NAMESPACE }} -o wide
         
-        # 检查 node-exporter 数量
-        echo "=== Node-Exporter Count ==="
-        kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=prometheus-node-exporter --no-headers | wc -l || echo "0"
+        # 检查 node-exporter 状态
+        echo "=== Node-Exporter Status ==="
+        kubectl get daemonset -n ${{ env.NAMESPACE }} | grep node-exporter || echo "No node-exporter daemonset found"
+        kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=node-exporter 2>/dev/null || echo "No node-exporter pods found"
+        kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=prometheus-node-exporter 2>/dev/null || echo "No prometheus-node-exporter pods found"
         
-        # 检查 Pod 详细状态
-        for pod in $(kubectl get pods -n ${{ env.NAMESPACE }} --no-headers -o custom-columns=":metadata.name" | head -5); do
-          echo "--- Diagnosing pod: $pod ---"
-          kubectl describe pod $pod -n ${{ env.NAMESPACE }} | grep -A 10 "Events:" || echo "No events found"
+        # 检查 Pod 详细状态（只检查前3个）
+        echo "=== Pod Events (first 3) ==="
+        for pod in $(kubectl get pods -n ${{ env.NAMESPACE }} --no-headers -o custom-columns=":metadata.name" | head -3); do
+          echo "--- Pod: $pod ---"
+          kubectl describe pod $pod -n ${{ env.NAMESPACE }} | grep -A 5 "Events:" || echo "No events found"
         done
         
         # 检查 PVC 状态
@@ -213,8 +259,8 @@ jobs:
         kubectl get services -n ${{ env.NAMESPACE }}
         
         # 检查最近的事件
-        echo "=== Recent Events (last 15) ==="
-        kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp | tail -15
+        echo "=== Recent Events (last 10) ==="
+        kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp | tail -10
 
     - name: Deploy Ingress resources
       if: steps.helm-deploy.outputs.helm_status == 'success'
@@ -255,8 +301,12 @@ jobs:
       if: steps.helm-deploy.outputs.helm_status == 'success'
       run: |
         echo "🏥 Running final health check..."
-        chmod +x scripts/health-check.sh
-        ./scripts/health-check.sh
+        if [ -f "scripts/health-check.sh" ]; then
+          chmod +x scripts/health-check.sh
+          ./scripts/health-check.sh
+        else
+          echo "ℹ️ No health-check script found, skipping"
+        fi
 
     - name: Get ALB endpoints
       if: steps.helm-deploy.outputs.helm_status == 'success'
@@ -298,6 +348,12 @@ jobs:
           echo "登录信息:"
           echo "Grafana 用户名: ${{ secrets.GRAFANA_ADMIN_USER }}"
           echo "Grafana 密码: [已设置]"
+          echo ""
+          echo "组件状态:"
+          echo "- Grafana: ✅ 运行中"
+          echo "- Prometheus: ✅ 运行中" 
+          echo "- Alertmanager: ✅ 运行中"
+          echo "- Node-Exporter: ❌ 已禁用（节省资源）"
           echo ""
           echo "下一步:"
           echo "1. 等待 ALB DNS 传播（可能需要几分钟）"

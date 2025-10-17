@@ -148,39 +148,25 @@ kubeStateMetrics:
       memory: "128Mi"
       cpu: "100m"
 
-# Node Exporter 配置 - 使用节点选择器限制在特定节点上运行
+# 完全禁用 Node Exporter 以节省资源
 nodeExporter:
-  enabled: true
-  
-  # 使用节点选择器，只在有 monitoring=true 标签的节点上运行
-  nodeSelector:
-    monitoring: "true"
-  
-  # 容忍所有污点，确保能在标记的节点上调度
-  tolerations:
-    - operator: "Exists"
-  
-  # 优化资源请求
-  resources:
-    requests:
-      memory: "32Mi"
-      cpu: "20m"
-    limits:
-      memory: "64Mi"
-      cpu: "50m"
+  enabled: false
 
-# 默认规则
+# 默认规则 - 禁用与 node-exporter 相关的规则
 defaultRules:
   create: true
   rules:
     alertmanager: true
-    etcd: false  # 禁用 etcd 规则
+    etcd: false
     general: true
     k8s: true
     kubeApiserverAvailability: true
     kubelet: true
-    node: true
+    node: false  # 禁用节点相关规则，因为 node-exporter 被禁用
     prometheus: true
+    nodeExporter: false  # 显式禁用 node-exporter 规则
+    nodeExporterRecording: false
+    nodeExporterAlerting: false
 
 # Operator 配置
 prometheusOperator:
@@ -201,3 +187,10 @@ prometheusOperator:
   # 禁用 admission webhook 以加快启动
   admissionWebhooks:
     enabled: false
+
+# 额外配置 - 确保没有残留的 node-exporter 配置
+extraObjects: []
+
+# 清理任何可能的残留配置
+prometheus-node-exporter:
+  enabled: false
