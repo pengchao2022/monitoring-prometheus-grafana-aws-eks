@@ -36,19 +36,11 @@ jobs:
         if [ -d "kubernetes" ]; then
           echo "kubernetes目录存在"
           find kubernetes/ -name "*.yaml" -o -name "*.yml"
-          echo ""
-          echo "=== ingress目录内容 ==="
-          ls -la kubernetes/ingress/
-        else
-          echo "❌ kubernetes目录不存在！"
         fi
         echo ""
         echo "=== 检查charts目录 ==="
         if [ -d "charts" ]; then
           echo "charts目录存在"
-          ls -la charts/
-          echo ""
-          echo "=== kube-prometheus-stack values文件 ==="
           ls -la charts/kube-prometheus-stack/
         fi
 
@@ -61,13 +53,9 @@ jobs:
 
     - name: Set up kubectl and helm
       run: |
-        # 安装 kubectl
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-        
-        # 安装 helm
         curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-        helm version
 
     - name: Update kubeconfig
       run: |
@@ -84,19 +72,42 @@ jobs:
 
     - name: Install kube-prometheus-stack with custom values
       run: |
-        echo "=== 使用Helm安装kube-prometheus-stack ==="
+        echo "=== 使用Helm安装kube-prometheus-stack（禁用node-exporter）==="
         
         if [ -f "charts/kube-prometheus-stack/values-alb.yaml" ]; then
-          echo "使用自定义values-alb.yaml文件安装..."
+          echo "使用自定义values-alb.yaml文件安装（禁用node-exporter）..."
           helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             -n monitoring \
             --create-namespace \
-            -f charts/kube-prometheus-stack/values-alb.yaml
+            -f charts/kube-prometheus-stack/values-alb.yaml \
+            --set nodeExporter.enabled=false
         else
-          echo "使用默认配置安装..."
+          echo "使用默认配置安装（禁用node-exporter）..."
           helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             -n monitoring \
-            --create-namespace
+            --create-namespace \
+            --set nodeExporter.enabled=false
+        fi
+
+    - name: Clean up existing Node Exporter
+      run: |
+        echo "=== 清理现有的Node Exporter ==="
+        # 删除Helm可能创建的node-exporter
+        kubectl delete daemonset kube-prometheus-stack-prometheus-node-exporter -n monitoring --ignore-not-found=true
+        # 删除pending的pods
+        kubectl delete pod -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --ignore-not-found=true
+
+    - name: Deploy custom Node Exporter
+      run: |
+        echo "=== 部署您本地的Node Exporter DaemonSet ==="
+        
+        if [ -f "kubernetes/node-exporter/daemonset-limited.yaml" ]; then
+          echo "部署您本地的Node Exporter..."
+          kubectl apply -f kubernetes/node-exporter/daemonset-limited.yaml -n monitoring
+          echo "✅ 本地Node Exporter部署完成"
+        else
+          echo "❌ 本地daemonset-limited.yaml文件不存在"
+          exit 1
         fi
 
     - name: Deploy additional Kubernetes manifests
@@ -106,13 +117,7 @@ jobs:
         # 部署network policies
         if [ -f "kubernetes/network-policies/monitoring-network-policy.yaml" ]; then
           echo "部署网络策略..."
-          kubectl apply -f kubernetes/network-policies/monitoring-network-policy.yaml -n monitoring
-        fi
-        
-        # 部署node exporter (如果Helm chart没有包含)
-        if [ -f "kubernetes/node-exporter/daemonset-limited.yaml" ]; then
-          echo "部署Node Exporter..."
-          kubectl apply -f kubernetes/node-exporter/daemonset-limited.yaml -n monitoring
+          kubectl apply -f kubernetes/network-policies/monitoring-network-policy.yaml -n monitoring || echo "NetworkPolicy部署失败，跳过"
         fi
         
         # 部署Ingress资源 - 使用您本地的Ingress文件
@@ -123,8 +128,7 @@ jobs:
       id: get_elb
       run: |
         echo "等待ALB创建..."
-        # 等待服务稳定
-        sleep 30
+        sleep 60
         
         # 检查所有资源状态
         echo "=== 检查部署状态 ==="
@@ -145,7 +149,7 @@ jobs:
     - name: Output access information
       run: |
         echo "=========================================="
-        echo "🚀 kube-prometheus-stack 部署完成！"
+        echo "🚀 监控栈部署完成！"
         echo "=========================================="
         echo ""
         echo "集群: ${{ env.CLUSTER_NAME }}"
@@ -161,7 +165,11 @@ jobs:
     - name: Final verification
       run: |
         echo "=== 最终验证 ==="
-        kubectl get all -n monitoring
+        echo "=== Pod状态 ==="
+        kubectl get pods -n monitoring -o wide
+        echo ""
+        echo "=== Node Exporter分布 ==="
+        kubectl get pods -n monitoring -l app=node-exporter-limited -o wide
         echo ""
         echo "=== Ingress详情 ==="
         kubectl get ingress -n monitoring -o wide
