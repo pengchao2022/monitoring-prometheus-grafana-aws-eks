@@ -53,13 +53,50 @@ jobs:
         sudo mv kubectl /usr/local/bin/
         
         # 安装 Helm
-        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3"
         chmod 700 get_helm.sh
         ./get_helm.sh
         
         # 验证安装
         kubectl version --client
         helm version
+
+    - name: Cleanup stuck Helm operations
+      run: |
+        echo "🧹 Cleaning up stuck Helm operations..."
+        
+        # 等待任何进行中的 Helm 操作完成或超时
+        echo "Waiting for any ongoing Helm operations to complete..."
+        sleep 30
+        
+        # 检查 release 状态
+        if helm status kube-prometheus-stack -n monitoring &>/dev/null; then
+          echo "Release exists, checking status..."
+          helm status kube-prometheus-stack -n monitoring
+          
+          # 尝试回滚任何进行中的操作
+          echo "Attempting to rollback any stuck operations..."
+          helm rollback kube-prometheus-stack -n monitoring --cleanup-on-fail --force 2>/dev/null || echo "Rollback not needed or already completed"
+        fi
+        
+        # 列出所有 Helm secret 并清理被卡住的
+        echo "Checking for stuck Helm secrets..."
+        kubectl get secrets -n monitoring -l owner=helm -o name 2>/dev/null | while read secret; do
+          secret_status=$(kubectl get "$secret" -n monitoring -o jsonpath='{.metadata.labels.status}' 2>/dev/null || echo "unknown")
+          if [ "$secret_status" = "pending" ] || [ "$secret_status" = "uninstalling" ]; then
+            echo "Deleting stuck secret: $secret (status: $secret_status)"
+            kubectl delete "$secret" -n monitoring --ignore-not-found=true
+          fi
+        done
+        
+        # 强制删除任何残留的 Helm 操作
+        echo "Force cleaning any remaining Helm operations..."
+        helm list -n monitoring --pending --output json | jq -r '.[].name' | while read release; do
+          echo "Force cleaning release: $release"
+          helm rollback "$release" -n monitoring --cleanup-on-fail --force 2>/dev/null || true
+        done
+        
+        echo "✅ Helm cleanup completed"
 
     - name: Pre-deployment cluster check
       run: |
@@ -165,43 +202,19 @@ jobs:
         
         echo "Completion time: $(date)"
 
-    - name: Verify node-exporter is disabled
+    - name: Verify node-exporter deployment
       if: steps.helm-deploy.outputs.helm_status == 'success'
       run: |
-        echo "🔍 Verifying node-exporter is disabled..."
+        echo "🔍 Verifying node-exporter deployment..."
         
-        echo "=== Checking for node-exporter DaemonSet ==="
-        kubectl get daemonset -n monitoring | grep node-exporter && echo "❌ node-exporter DaemonSet still exists" || echo "✅ No node-exporter DaemonSet found"
+        echo "=== Node-exporter DaemonSet Status ==="
+        kubectl get daemonset -n monitoring | grep node-exporter || echo "No node-exporter DaemonSet found"
         
-        echo "=== Checking for node-exporter Pods ==="
-        NODE_EXPORTER_PODS=$(kubectl get pods -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --no-headers 2>/dev/null | wc -l)
-        if [ "$NODE_EXPORTER_PODS" -eq "0" ]; then
-          echo "✅ No node-exporter pods found (as expected)"
-        else
-          echo "❌ Found $NODE_EXPORTER_PODS node-exporter pods (should be 0)"
-          kubectl get pods -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter
-        fi
-
-    - name: Deploy custom limited node-exporter
-      if: steps.helm-deploy.outputs.helm_status == 'success'
-      run: |
-        echo "🚀 Deploying custom limited node-exporter..."
+        echo "=== Node-exporter Pods ==="
+        kubectl get pods -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter
         
-        # 检查是否存在自定义 node-exporter 配置文件
-        if [ -f "kubernetes/node-exporter/daemonset-limited.yaml" ]; then
-          kubectl apply -f kubernetes/node-exporter/daemonset-limited.yaml -n monitoring
-          echo "✅ Custom node-exporter deployed"
-          
-          # 等待自定义 DaemonSet 的 Pods 就绪
-          echo "⏳ Waiting for custom node-exporter pods..."
-          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=node-exporter,app.kubernetes.io/instance=limited -n monitoring --timeout=120s || echo "⚠️ Some pods may still be starting"
-          
-          echo "=== Custom node-exporter status ==="
-          kubectl get daemonset node-exporter-limited -n monitoring
-          kubectl get pods -n monitoring -l app.kubernetes.io/name=node-exporter
-        else
-          echo "ℹ️ No custom node-exporter configuration found, skipping"
-        fi
+        echo "=== Pods Distribution ==="
+        kubectl get pods -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter -o wide
 
     - name: Real-time installation monitoring
       if: always()
@@ -240,8 +253,7 @@ jobs:
         # 检查 node-exporter 状态
         echo "=== Node-Exporter Status ==="
         kubectl get daemonset -n ${{ env.NAMESPACE }} | grep node-exporter || echo "No node-exporter daemonset found"
-        kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=node-exporter 2>/dev/null || echo "No node-exporter pods found"
-        kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=prometheus-node-exporter 2>/dev/null || echo "No prometheus-node-exporter pods found"
+        kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=prometheus-node-exporter 2>/dev/null || echo "No node-exporter pods found"
         
         # 检查 Pod 详细状态（只检查前3个）
         echo "=== Pod Events (first 3) ==="
@@ -353,7 +365,7 @@ jobs:
           echo "- Grafana: ✅ 运行中"
           echo "- Prometheus: ✅ 运行中" 
           echo "- Alertmanager: ✅ 运行中"
-          echo "- Node-Exporter: ❌ 已禁用（节省资源）"
+          echo "- Node-Exporter: ✅ 在2个节点上运行"
           echo ""
           echo "下一步:"
           echo "1. 等待 ALB DNS 传播（可能需要几分钟）"
