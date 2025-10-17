@@ -204,7 +204,7 @@ prometheusOperator:
 
   # 启用 admission webhook 以解决 TLS secret 问题
   admissionWebhooks:
-    enabled: true
+    enabled: false
     # 禁用失败策略，避免 webhook 问题阻塞部署
     failurePolicy: Ignore
     # 减少资源请求
