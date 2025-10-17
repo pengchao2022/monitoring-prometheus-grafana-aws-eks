@@ -49,12 +49,17 @@ jobs:
       run: |
         # 安装 kubectl
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-        sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
         
-        # 安装 Helm
-        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3"
+        # 安装 Helm（修复引号问题）
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
         chmod 700 get_helm.sh
         ./get_helm.sh
+        
+        # 验证安装
+        kubectl version --client
+        helm version
 
     - name: Pre-deployment cluster check
       run: |
@@ -67,7 +72,7 @@ jobs:
         
         # 检查节点资源
         echo "=== Node Resources ==="
-        kubectl describe nodes | grep -A 5 "Allocated resources" || echo "Resource info not available"
+        kubectl top nodes 2>/dev/null || echo "Metrics server not available"
         
         # 检查存储类
         echo "=== Storage Classes ==="
@@ -105,32 +110,37 @@ jobs:
         echo "🚀 Starting kube-prometheus-stack installation..."
         echo "Start time: $(date)"
         
-        # 设置超时和重试逻辑
-        timeout 600s bash -c '
-          for i in {1..3}; do
-            echo "Attempt $i of 3..."
-            if helm upgrade --install kube-prometheus-stack \
-              prometheus-community/kube-prometheus-stack \
-              --namespace ${{ env.NAMESPACE }} \
-              --version 48.1.1 \
-              --values charts/kube-prometheus-stack/values-alb.yaml \
-              --wait \
-              --timeout 15m \
-              --atomic \
-              --create-namespace; then
-              echo "✅ Helm installation successful on attempt $i"
-              exit 0
+        # 设置安装超时和重试逻辑
+        max_attempts=3
+        attempt=1
+        
+        while [ $attempt -le $max_attempts ]; do
+          echo "Attempt $attempt of $max_attempts..."
+          
+          if helm upgrade --install kube-prometheus-stack \
+            prometheus-community/kube-prometheus-stack \
+            --namespace ${{ env.NAMESPACE }} \
+            --version 48.1.1 \
+            --values charts/kube-prometheus-stack/values-alb.yaml \
+            --wait \
+            --timeout 15m \
+            --atomic \
+            --create-namespace; then
+            
+            echo "✅ Helm installation successful on attempt $attempt"
+            echo "success" > /tmp/helm-status
+            break
+          else
+            echo "❌ Helm installation failed on attempt $attempt"
+            if [ $attempt -lt $max_attempts ]; then
+              echo "Waiting 30 seconds before retry..."
+              sleep 30
             else
-              echo "❌ Helm installation failed on attempt $i"
-              if [[ $i -lt 3 ]]; then
-                echo "Waiting 30 seconds before retry..."
-                sleep 30
-              fi
+              echo "error" > /tmp/helm-status
             fi
-          done
-          echo "❌ All installation attempts failed"
-          exit 1
-        '
+          fi
+          attempt=$((attempt + 1))
+        done
         
         echo "Completion time: $(date)"
 
@@ -141,20 +151,20 @@ jobs:
         echo "==================================="
         
         # 持续监控 Pod 状态
-        for i in {1..12}; do
+        for i in {1..6}; do
           echo "--- Status check $i --- $(date)"
           echo "Pods:"
           kubectl get pods -n ${{ env.NAMESPACE }} --sort-by=.status.startTime | head -10
           
           echo "Events:"
-          kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp --field-selector type=Warning 2>/dev/null | tail -5 || echo "No warning events"
+          kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp --field-selector type=Warning 2>/dev/null | tail -3 || echo "No warning events"
           
           # 检查镜像拉取状态
           echo "Image Pull Status:"
           kubectl get pods -n ${{ env.NAMESPACE }} -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{range .status.containerStatuses[*]}{.state.waiting.reason}{" "}{.state.waiting.message}{"\t"}{end}{"\n"}{end}' 2>/dev/null || echo "Cannot get detailed status"
           
-          if [[ $i -lt 12 ]]; then
-            sleep 10
+          if [ $i -lt 6 ]; then
+            sleep 20
           fi
         done
 
@@ -176,30 +186,28 @@ jobs:
         for pod in $(kubectl get pods -n ${{ env.NAMESPACE }} --no-headers -o custom-columns=":metadata.name"); do
           echo "--- Diagnosing pod: $pod ---"
           kubectl describe pod $pod -n ${{ env.NAMESPACE }} | grep -A 10 "Events:" || echo "No events found"
-          
-          # 检查容器状态
-          kubectl get pod $pod -n ${{ env.NAMESPACE }} -o jsonpath='{range .status.containerStatuses[*]}{.name}{": "}{.state}{"\n"}{end}' 2>/dev/null || echo "Cannot get container status"
         done
         
         # 检查 PVC 状态
         echo "=== PVC Status ==="
-        kubectl get pvc -n ${{ env.NAMESPACE }} -o wide
+        kubectl get pvc -n ${{ env.NAMESPACE }} -o wide 2>/dev/null || echo "No PVCs found"
         
         # 检查服务状态
         echo "=== Service Status ==="
         kubectl get services -n ${{ env.NAMESPACE }}
         
         # 检查最近的事件
-        echo "=== Recent Events (last 20) ==="
-        kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp | tail -20
+        echo "=== Recent Events (last 15) ==="
+        kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp | tail -15
 
     - name: Deploy Ingress resources
-      if: steps.helm-install.outcome == 'success'
+      if: success()
       run: |
+        echo "🚀 Deploying Ingress resources..."
         kubectl apply -f kubernetes/ingress/ -n ${{ env.NAMESPACE }}
 
     - name: Wait for ALB provisioning
-      if: steps.helm-install.outcome == 'success'
+      if: success()
       run: |
         echo "⏳ Waiting for ALB provisioning..."
         
@@ -207,7 +215,7 @@ jobs:
         timeout 300s bash -c '
           while true; do
             ALB_HOSTNAME=$(kubectl get ingress grafana-ingress -n ${{ env.NAMESPACE }} -o jsonpath="{.status.loadBalancer.ingress[0].hostname}" 2>/dev/null)
-            if [[ -n "$ALB_HOSTNAME" ]]; then
+            if [ -n "$ALB_HOSTNAME" ]; then
               echo "✅ ALB provisioned: $ALB_HOSTNAME"
               break
             fi
@@ -220,13 +228,14 @@ jobs:
         kubectl get ingress -n ${{ env.NAMESPACE }}
 
     - name: Final health check
-      if: steps.helm-install.outcome == 'success'
+      if: success()
       run: |
+        echo "🏥 Running final health check..."
         chmod +x scripts/health-check.sh
         ./scripts/health-check.sh
 
     - name: Get ALB endpoints
-      if: steps.helm-install.outcome == 'success'
+      if: success()
       id: endpoints
       run: |
         GRAFANA_ALB=$(kubectl get ingress grafana-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
@@ -246,7 +255,7 @@ jobs:
       uses: actions/github-script@v6
       with:
         script: |
-          const helmStatus = '${{ steps.helm-install.outcome }}';
+          const success = '${{ success() }}';
           const grafanaAlb = '${{ steps.endpoints.outputs.grafana_alb }}';
           const prometheusAlb = '${{ steps.endpoints.outputs.prometheus_alb }}';
           const alertmanagerAlb = '${{ steps.endpoints.outputs.alertmanager_alb }}';
@@ -254,17 +263,17 @@ jobs:
           let statusMessage = '';
           let details = '';
           
-          if (helmStatus === 'success') {
+          if (success === 'true') {
             statusMessage = '🎉 Monitoring Stack with ALB 部署完成!';
             details = `**ALB 访问地址:**\n- 📊 Grafana: http://${grafanaAlb}\n- 📈 Prometheus: http://${prometheusAlb}\n- 🚨 Alertmanager: http://${alertmanagerAlb}\n\n**登录信息:**\n- Grafana 用户名: \`${{ secrets.GRAFANA_ADMIN_USER }}\`\n- Grafana 密码: \`${{ secrets.GRAFANA_ADMIN_PASSWORD }}\``;
           } else {
             statusMessage = '❌ Monitoring Stack 部署失败';
-            details = 'Helm 安装过程中出现超时或错误。请检查诊断日志了解具体原因。';
+            details = '部署过程中出现错误。请检查 GitHub Actions 日志了解具体原因。';
           }
           
           github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
-            body: `${statusMessage}\n\n${details}\n\n**诊断信息:**\n- Helm 安装结果: ${helmStatus}\n- 部署时间: 约 15 分钟（包含诊断）`
+            body: `${statusMessage}\n\n${details}`
           });
