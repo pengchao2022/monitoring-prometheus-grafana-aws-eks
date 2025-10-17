@@ -4,8 +4,10 @@ on:
   push:
     branches: [main]
     paths:
+      - 'monitoring/**'
       - 'charts/**'
       - 'kubernetes/**'
+  workflow_dispatch:
 
 env:
   CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
@@ -47,7 +49,75 @@ jobs:
           kubectl delete daemonset kube-prometheus-stack-prometheus-node-exporter -n monitoring --ignore-not-found=true
           echo "Deleted old node-exporter"
 
+      - name: Deploy Ingress Resources
+        run: |
+          echo "Deploying monitoring ingress resources..."
+          kubectl apply -f kubernetes/ingress/
+
+      - name: Wait for ALB Provisioning
+        run: |
+          echo "Waiting for ALB to be provisioned..."
+          sleep 60
+          
+          # Wait for Prometheus ALB
+          echo "Waiting for Prometheus ALB..."
+          for i in {1..30}; do
+            PROMETHEUS_HOSTNAME=$(kubectl get ingress prometheus-ingress -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$PROMETHEUS_HOSTNAME" ]; then
+              echo "prometheus_alb_url=http://$PROMETHEUS_HOSTNAME" >> $GITHUB_ENV
+              break
+            fi
+            echo "Attempt $i: Prometheus ALB not ready yet..."
+            sleep 10
+          done
+          
+          # Wait for Grafana ALB
+          echo "Waiting for Grafana ALB..."
+          for i in {1..30}; do
+            GRAFANA_HOSTNAME=$(kubectl get ingress grafana-ingress -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$GRAFANA_HOSTNAME" ]; then
+              echo "grafana_alb_url=http://$GRAFANA_HOSTNAME" >> $GITHUB_ENV
+              break
+            fi
+            echo "Attempt $i: Grafana ALB not ready yet..."
+            sleep 10
+          done
+          
+          # Wait for Alertmanager ALB
+          echo "Waiting for Alertmanager ALB..."
+          for i in {1..30}; do
+            ALERTMANAGER_HOSTNAME=$(kubectl get ingress alertmanager-ingress -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$ALERTMANAGER_HOSTNAME" ]; then
+              echo "alertmanager_alb_url=http://$ALERTMANAGER_HOSTNAME" >> $GITHUB_ENV
+              break
+            fi
+            echo "Attempt $i: Alertmanager ALB not ready yet..."
+            sleep 10
+          done
+
       - name: Check Result
         run: |
           echo "=== All Pods ==="
           kubectl get pods -n monitoring
+          
+          echo "=== Services ==="
+          kubectl get services -n monitoring
+          
+          echo "=== Ingresses ==="
+          kubectl get ingress -n monitoring
+
+      - name: Output ALB URLs
+        run: |
+          echo "================================================"
+          echo "🚀 Monitoring Stack Deployed Successfully!"
+          echo "================================================"
+          echo "📊 Prometheus URL: ${{ env.prometheus_alb_url }}"
+          echo ""
+          echo "📈 Grafana URL: ${{ env.grafana_alb_url }}"
+          echo ""
+          echo "🚨 Alertmanager URL: ${{ env.alertmanager_alb_url }}"
+          echo ""
+          echo "🔑 Grafana Credentials:"
+          echo "   Username: ${{ secrets.GRAFANA_ADMIN_USER }}"
+          echo "   Password: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}"
+          echo "================================================"
