@@ -20,6 +20,37 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Debug - Check files in workspace
+      run: |
+        echo "=== 当前工作目录文件 ==="
+        pwd
+        ls -la
+        echo ""
+        echo "=== 检查监控配置文件 ==="
+        find . -name "*.yaml" -o -name "*.yml" | head -10
+        echo ""
+        echo "=== 检查kubernetes目录结构 ==="
+        if [ -d "kubernetes" ]; then
+          echo "kubernetes目录存在"
+          find kubernetes/ -name "*.yaml" -o -name "*.yml"
+          echo ""
+          echo "=== ingress目录内容 ==="
+          ls -la kubernetes/ingress/
+        else
+          echo "❌ kubernetes目录不存在！"
+        fi
+        echo ""
+        echo "=== 检查charts目录 ==="
+        if [ -d "charts" ]; then
+          echo "charts目录存在"
+          ls -la charts/
+          echo ""
+          echo "=== kube-prometheus-stack values文件 ==="
+          ls -la charts/kube-prometheus-stack/
+        fi
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
@@ -28,108 +59,109 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Set up kubectl
+    - name: Set up kubectl and helm
       run: |
+        # 安装 kubectl
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+        
+        # 安装 helm
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+        helm version
 
     - name: Update kubeconfig
       run: |
         aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
 
-    - name: Deploy Monitoring Stack
+    - name: Create monitoring namespace
       run: |
         kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
-        echo "Deployed monitoring stack"
 
-    - name: Wait for ALB
+    - name: Add prometheus-community helm repository
       run: |
-        echo "Waiting for ALB to be ready..."
-        for i in {1..30}; do
-          if kubectl get ingress -n monitoring &>/dev/null; then
-            ELB_EXISTS=$(kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "not-ready")
-            if [[ "$ELB_EXISTS" != "not-ready" ]] && [[ -n "$ELB_EXISTS" ]]; then
-              echo "ALB is ready!"
-              break
-            fi
-          fi
-          echo "Waiting... ($i/30)"
-          sleep 10
-        done
+        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+        helm repo update
 
-    - name: Create Access Info Files
+    - name: Install kube-prometheus-stack with custom values
       run: |
+        echo "=== 使用Helm安装kube-prometheus-stack ==="
+        
+        if [ -f "charts/kube-prometheus-stack/values-alb.yaml" ]; then
+          echo "使用自定义values-alb.yaml文件安装..."
+          helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+            -n monitoring \
+            --create-namespace \
+            -f charts/kube-prometheus-stack/values-alb.yaml
+        else
+          echo "使用默认配置安装..."
+          helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+            -n monitoring \
+            --create-namespace
+        fi
+
+    - name: Deploy additional Kubernetes manifests
+      run: |
+        echo "=== 部署额外的Kubernetes清单文件 ==="
+        
+        # 部署network policies
+        if [ -f "kubernetes/network-policies/monitoring-network-policy.yaml" ]; then
+          echo "部署网络策略..."
+          kubectl apply -f kubernetes/network-policies/monitoring-network-policy.yaml -n monitoring
+        fi
+        
+        # 部署node exporter (如果Helm chart没有包含)
+        if [ -f "kubernetes/node-exporter/daemonset-limited.yaml" ]; then
+          echo "部署Node Exporter..."
+          kubectl apply -f kubernetes/node-exporter/daemonset-limited.yaml -n monitoring
+        fi
+        
+        # 部署Ingress资源 - 使用您本地的Ingress文件
+        echo "部署Ingress资源..."
+        kubectl apply -f kubernetes/ingress/ -n monitoring
+
+    - name: Wait for ALB and get address
+      id: get_elb
+      run: |
+        echo "等待ALB创建..."
+        # 等待服务稳定
+        sleep 30
+        
+        # 检查所有资源状态
+        echo "=== 检查部署状态 ==="
+        kubectl get pods,svc,ingress -n monitoring
+        
         # 获取ELB地址
         ELB_ADDRESS=$(kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
         
-        # 创建详细的访问信息文件
-        cat > ACCESS_INFO.md << EOF
-        # Monitoring Stack Access Information
+        if [ -z "$ELB_ADDRESS" ]; then
+          echo "❌ 无法获取ELB地址，等待重试..."
+          sleep 30
+          ELB_ADDRESS=$(kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
+        fi
         
-        ## ELB Address
-        $ELB_ADDRESS
-        
-        ## Access URLs
-        - Prometheus: http://$ELB_ADDRESS/prometheus
-        - Grafana: http://$ELB_ADDRESS/grafana  
-        - Alertmanager: http://$ELB_ADDRESS/alertmanager
-        
-        ## Quick Access Commands
-        \`\`\`bash
-        # Test Grafana access
-        curl -v http://$ELB_ADDRESS/grafana
-        
-        # Test Prometheus access  
-        curl -v http://$ELB_ADDRESS/prometheus
-        
-        # Get ELB address (if needed again)
-        kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}'
-        \`\`\`
-        
-        ## Deployment Info
-        - Cluster: ${{ env.CLUSTER_NAME }}
-        - Region: ${{ env.AWS_REGION }}
-        - Timestamp: $(date)
-        EOF
-        
-        # 创建简单的环境变量文件
-        cat > urls.txt << EOF
-        ELB_ADDRESS=$ELB_ADDRESS
-        PROMETHEUS_URL=http://$ELB_ADDRESS/prometheus
-        GRAFANA_URL=http://$ELB_ADDRESS/grafana
-        ALERTMANAGER_URL=http://$ELB_ADDRESS/alertmanager
-        EOF
-        
-        echo "Access information files created"
+        echo "ELB_ADDRESS=$ELB_ADDRESS" >> $GITHUB_OUTPUT
+        echo "ELB地址: $ELB_ADDRESS"
 
-    - name: Upload Access Info as Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: monitoring-access-info
-        path: |
-          ACCESS_INFO.md
-          urls.txt
-        retention-days: 30
-
-    - name: Final Instructions
+    - name: Output access information
       run: |
         echo "=========================================="
-        echo "✅ DEPLOYMENT COMPLETE"
+        echo "🚀 kube-prometheus-stack 部署完成！"
         echo "=========================================="
         echo ""
-        echo "📥 DOWNLOAD ACCESS INFORMATION:"
-        echo "1. Go to this workflow run in GitHub"
-        echo "2. Scroll down to the 'Artifacts' section"  
-        echo "3. Download 'monitoring-access-info'"
-        echo "4. Open ACCESS_INFO.md for complete details"
+        echo "集群: ${{ env.CLUSTER_NAME }}"
+        echo "区域: ${{ env.AWS_REGION }}"
         echo ""
-        echo "🔗 ALTERNATIVE: Get ELB address locally with:"
-        echo "kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}'"
+        echo "使用以下URL访问监控面板："
+        echo "📊 Prometheus: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/prometheus"
+        echo "📈 Grafana: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/grafana"
+        echo "🚨 Alertmanager: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/alertmanager"
         echo ""
-        echo "🌐 ACCESS YOUR DASHBOARDS:"
-        echo "After getting the ELB address, use:"
-        echo "- /grafana for Grafana"
-        echo "- /prometheus for Prometheus" 
-        echo "- /alertmanager for Alertmanager"
+        echo "如果路径访问有问题，请检查Ingress配置的路径规则"
+
+    - name: Final verification
+      run: |
+        echo "=== 最终验证 ==="
+        kubectl get all -n monitoring
         echo ""
-        echo "=========================================="
+        echo "=== Ingress详情 ==="
+        kubectl get ingress -n monitoring -o wide
