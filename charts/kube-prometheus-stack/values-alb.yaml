@@ -1,4 +1,4 @@
-# 优化版本 - 加快部署速度
+# 优化版本 - 最小资源占用
 # kube-prometheus-stack values for ALB integration
 
 # 全局配置
@@ -38,16 +38,16 @@ grafana:
     datasources:
       enabled: false
   
-  # 优化资源请求
+  # 大幅减少资源请求
   resources:
     requests:
-      memory: "256Mi"
-      cpu: "100m"
+      memory: "128Mi"
+      cpu: "50m"
     limits:
-      memory: "512Mi"
-      cpu: "500m"
+      memory: "256Mi"
+      cpu: "200m"
 
-# Prometheus 配置
+# Prometheus 配置 - 最小化资源
 prometheus:
   enabled: true
   
@@ -63,23 +63,23 @@ prometheus:
     # 优化配置
     scrapeInterval: 60s
     evaluationInterval: 60s
-    retention: 2d
-    retentionSize: "5GB"
+    retention: 1d        # 进一步减少保留时间
+    retentionSize: "2GB" # 进一步减少存储大小
     
     # 减少副本数
     replicas: 1
     
-    # 首次部署禁用持久化
+    # 完全禁用持久化
     storageSpec: {}
     
-    # 优化资源请求
+    # 大幅减少资源请求
     resources:
       requests:
-        memory: "512Mi"
-        cpu: "250m"
+        memory: "64Mi"
+        cpu: "25m"
       limits:
-        memory: "1Gi"
-        cpu: "500m"
+        memory: "128Mi"
+        cpu: "100m"
     
     # 简化服务发现
     serviceMonitorSelectorNilUsesHelmValues: false
@@ -87,7 +87,7 @@ prometheus:
     podMonitorSelectorNilUsesHelmValues: false
     podMonitorSelector: {}
 
-# Alertmanager 配置
+# Alertmanager 配置 - 最小化资源
 alertmanager:
   enabled: true
   
@@ -106,14 +106,14 @@ alertmanager:
     # 禁用持久化
     storage: {}
     
-    # 优化资源请求
+    # 大幅减少资源请求
     resources:
       requests:
+        memory: "64Mi"
+        cpu: "25m"
+      limits:
         memory: "128Mi"
         cpu: "100m"
-      limits:
-        memory: "256Mi"
-        cpu: "250m"
 
 # 禁用非核心组件以加快部署
 kubeEtcd:
@@ -142,17 +142,17 @@ kubeStateMetrics:
   enabled: true
   resources:
     requests:
+      memory: "32Mi"
+      cpu: "25m"
+    limits:
       memory: "64Mi"
       cpu: "50m"
-    limits:
-      memory: "128Mi"
-      cpu: "100m"
 
-# Node Exporter 配置 - 只在有 monitoring=true 标签的节点上运行
+# Node Exporter 配置 - 关键：确保节点选择器在 CICD 中生效
 nodeExporter:
   enabled: true
   
-  # 使用节点选择器限制在特定节点上运行
+  # 使用节点选择器限制在特定节点上运行 - 确保这个配置生效
   nodeSelector:
     monitoring: "true"
     kubernetes.io/os: linux
@@ -164,11 +164,11 @@ nodeExporter:
   # 优化资源请求
   resources:
     requests:
-      memory: "32Mi"
-      cpu: "20m"
+      memory: "16Mi"  # 进一步减少
+      cpu: "10m"
     limits:
-      memory: "64Mi"
-      cpu: "50m"
+      memory: "32Mi"
+      cpu: "25m"
 
 # 默认规则 - 重新启用节点相关规则
 defaultRules:
@@ -180,9 +180,9 @@ defaultRules:
     k8s: true
     kubeApiserverAvailability: true
     kubelet: true
-    node: true  # 重新启用节点相关规则
+    node: true
     prometheus: true
-    nodeExporter: true  # 重新启用 node-exporter 规则
+    nodeExporter: true
     nodeExporterRecording: true
     nodeExporterAlerting: true
 
@@ -190,11 +190,11 @@ defaultRules:
 prometheusOperator:
   resources:
     requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
       memory: "128Mi"
       cpu: "100m"
-    limits:
-      memory: "256Mi"
-      cpu: "300m"
   
   # 优化镜像配置
   image:
@@ -212,15 +212,11 @@ prometheusOperator:
       enabled: true
       resources:
         requests:
-          memory: "32Mi"
-          cpu: "20m"
+          memory: "16Mi"
+          cpu: "10m"
         limits:
-          memory: "64Mi"
-          cpu: "50m"
+          memory: "32Mi"
+          cpu: "25m"
 
-# 额外配置 - 确保没有残留的 node-exporter 配置
+# 额外配置 - 确保节点选择器生效
 extraObjects: []
-
-# 清理任何可能的残留配置
-prometheus-node-exporter:
-  enabled: false

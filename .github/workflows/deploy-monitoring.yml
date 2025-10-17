@@ -1,22 +1,11 @@
-name: Deploy Monitoring Stack with ALB
+name: Deploy Monitoring Stack
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
     paths:
       - 'charts/**'
       - 'kubernetes/**'
-      - '.github/workflows/deploy-monitoring.yml'
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: '部署环境'
-        required: true
-        default: 'production'
-        type: choice
-        options:
-        - staging
-        - production
 
 env:
   CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
@@ -26,383 +15,39 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment || 'production' }}
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: AWS Setup
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: Update kubeconfig
-      run: |
-        aws eks update-kubeconfig \
-          --region ${{ env.AWS_REGION }} \
-          --name ${{ env.CLUSTER_NAME }}
+      - name: Setup Tools
+        run: |
+          aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-    - name: Setup kubectl and Helm
-      run: |
-        # 安装 kubectl
-        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-        chmod +x kubectl
-        sudo mv kubectl /usr/local/bin/
-        
-        # 安装 Helm
-        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-        chmod 700 get_helm.sh
-        ./get_helm.sh
-        
-        # 验证安装
-        kubectl version --client
-        helm version
+      - name: Deploy Stack
+        run: |
+          kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic grafana-admin-secret --namespace=$NAMESPACE --from-literal=admin-user=${{ secrets.GRAFANA_ADMIN_USER }} --from-literal=admin-password=${{ secrets.GRAFANA_ADMIN_PASSWORD }} --dry-run=client -o yaml | kubectl apply -f -
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+          helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack --namespace $NAMESPACE --values charts/kube-prometheus-stack/values-alb.yaml --create-namespace
 
-    - name: Force cleanup stuck Helm operations
-      run: |
-        echo "🧹 FORCE CLEANUP: Removing all stuck Helm operations..."
-        
-        # 方法1: 检查并删除所有进行中的 Helm secret
-        echo "=== Deleting all Helm secrets with pending status ==="
-        kubectl get secrets -n monitoring -l owner=helm -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | while read secret; do
-          status=$(kubectl get secret "$secret" -n monitoring -o jsonpath='{.metadata.labels.status}' 2>/dev/null || echo "unknown")
-          echo "Secret: $secret (status: $status)"
-          if [ "$status" = "pending" ] || [ "$status" = "uninstalling" ] || [ "$status" = "superseded" ]; then
-            echo "🚨 DELETING stuck secret: $secret"
-            kubectl delete secret "$secret" -n monitoring --ignore-not-found=true
-          fi
-        done
-        
-        # 方法2: 强制删除所有 Helm 相关 secret（更激进）
-        echo "=== Force deleting ALL Helm secrets in monitoring namespace ==="
-        kubectl delete secrets -n monitoring -l owner=helm --ignore-not-found=true
-        
-        # 方法3: 检查 release 状态并强制清理
-        echo "=== Checking Helm release status ==="
-        if helm status kube-prometheus-stack -n monitoring &>/dev/null; then
-          echo "Release exists, getting detailed status..."
-          helm status kube-prometheus-stack -n monitoring
-          
-          echo "🚨 FORCE DELETING the release..."
-          helm uninstall kube-prometheus-stack -n monitoring --wait --timeout 5m 2>/dev/null || \
-          helm delete kube-prometheus-stack -n monitoring 2>/dev/null || \
-          echo "Release deletion attempted"
-        else
-          echo "No existing release found"
-        fi
-        
-        # 方法4: 清理任何残留的配置
-        echo "=== Cleaning up any remaining resources ==="
-        kubectl delete daemonset -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --ignore-not-found=true
-        kubectl delete pods -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --ignore-not-found=true
-        kubectl delete deployment -n monitoring -l app=kube-prometheus-stack-operator --ignore-not-found=true
-        
-        # 等待确保清理完成
-        sleep 10
-        echo "✅ Force cleanup completed"
-
-    - name: Pre-deployment cluster check
-      run: |
-        echo "🔍 Pre-deployment Cluster Diagnostics"
-        echo "====================================="
-        
-        # 检查节点状态
-        echo "=== Node Status ==="
-        kubectl get nodes -o wide
-        
-        # 检查节点资源
-        echo "=== Node Resources ==="
-        kubectl top nodes 2>/dev/null || echo "Metrics server not available"
-        
-        # 检查存储类
-        echo "=== Storage Classes ==="
-        kubectl get storageclass
-        
-        # 检查现有命名空间
-        echo "=== Existing Monitoring Namespace ==="
-        kubectl get namespace ${{ env.NAMESPACE }} || echo "Namespace does not exist yet"
-
-    - name: Verify AWS Load Balancer Controller
-      run: |
-        echo "🔍 Checking existing AWS Load Balancer Controller..."
-        kubectl get pods -A | grep aws-load-balancer-controller || echo "❌ AWS Load Balancer Controller not found"
-
-    - name: Create monitoring namespace
-      run: |
-        kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
-
-    - name: Create Grafana secret
-      run: |
-        kubectl create secret generic grafana-admin-secret \
-          --namespace=${{ env.NAMESPACE }} \
-          --from-literal=admin-user=${{ secrets.GRAFANA_ADMIN_USER }} \
-          --from-literal=admin-password=${{ secrets.GRAFANA_ADMIN_PASSWORD }} \
-          --dry-run=client -o yaml | kubectl apply -f -
-
-    - name: Cleanup existing node-exporters
-      run: |
-        echo "🧹 Cleaning up existing node-exporters..."
-        
-        # 删除默认的 node-exporter DaemonSet
-        kubectl delete daemonset kube-prometheus-stack-prometheus-node-exporter -n monitoring --ignore-not-found=true
-        
-        # 删除所有 node-exporter pods
-        kubectl delete pod -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --ignore-not-found=true
-        
-        # 删除自定义的 node-exporter（如果有）
-        kubectl delete daemonset node-exporter-limited -n monitoring --ignore-not-found=true
-        kubectl delete pod -n monitoring -l app.kubernetes.io/name=node-exporter --ignore-not-found=true
-        
-        echo "✅ Cleanup completed"
-
-    - name: Add Helm repositories
-      run: |
-        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-        helm repo update
-
-    - name: Deploy kube-prometheus-stack with timeout
-      id: helm-deploy
-      run: |
-        echo "🚀 Starting kube-prometheus-stack installation..."
-        echo "Start time: $(date)"
-        
-        # 首先检查是否还有进行中的操作
-        echo "=== Checking for any remaining stuck operations ==="
-        kubectl get secrets -n monitoring -l owner=helm -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels.status}{"\n"}{end}' 2>/dev/null || echo "No Helm secrets found"
-        
-        # 设置安装超时和重试逻辑
-        max_attempts=3
-        attempt=1
-        success=false
-        
-        while [ $attempt -le $max_attempts ]; do
-          echo "Attempt $attempt of $max_attempts..."
-          
-          if helm upgrade --install kube-prometheus-stack \
-            prometheus-community/kube-prometheus-stack \
-            --namespace ${{ env.NAMESPACE }} \
-            --version 48.1.1 \
-            --values charts/kube-prometheus-stack/values-alb.yaml \
-            --wait \
-            --timeout 15m \
-            --atomic \
-            --create-namespace; then
-            
-            echo "✅ Helm installation successful on attempt $attempt"
-            success=true
-            break
-          else
-            echo "❌ Helm installation failed on attempt $attempt"
-            if [ $attempt -lt $max_attempts ]; then
-              echo "Waiting 30 seconds before retry..."
-              sleep 30
-              # 每次重试前再次清理
-              echo "Cleaning up before retry..."
-              kubectl delete secrets -n monitoring -l owner=helm --ignore-not-found=true
-            fi
-          fi
-          attempt=$((attempt + 1))
-        done
-        
-        if [ "$success" = true ]; then
-          echo "helm_status=success" >> $GITHUB_OUTPUT
-        else
-          echo "helm_status=failed" >> $GITHUB_OUTPUT
-        fi
-        
-        echo "Completion time: $(date)"
-
-    - name: Verify node-exporter deployment
-      if: steps.helm-deploy.outputs.helm_status == 'success'
-      run: |
-        echo "🔍 Verifying node-exporter deployment..."
-        
-        echo "=== Node-exporter DaemonSet Status ==="
-        kubectl get daemonset -n monitoring | grep node-exporter || echo "No node-exporter DaemonSet found"
-        
-        echo "=== Node-exporter Pods ==="
-        kubectl get pods -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter
-        
-        echo "=== Pods Distribution ==="
-        kubectl get pods -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter -o wide
-
-    - name: Real-time installation monitoring
-      if: always()
-      run: |
-        echo "📊 Real-time Installation Monitoring"
-        echo "==================================="
-        
-        # 持续监控 Pod 状态
-        for i in {1..6}; do
-          echo "--- Status check $i --- $(date)"
-          echo "Pods:"
-          kubectl get pods -n ${{ env.NAMESPACE }} --sort-by=.status.startTime | head -10
-          
-          echo "Events:"
-          kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp --field-selector type=Warning 2>/dev/null | tail -3 || echo "No warning events"
-          
-          if [ $i -lt 6 ]; then
-            sleep 20
-          fi
-        done
-
-    - name: Post-installation diagnostics
-      if: always()
-      run: |
-        echo "🔍 Post-installation Diagnostics"
-        echo "================================"
-        
-        # 检查 Helm release 状态
-        echo "=== Helm Release Status ==="
-        helm list -n ${{ env.NAMESPACE }} || echo "Helm release not found"
-        
-        # 详细 Pod 诊断
-        echo "=== Detailed Pod Diagnostics ==="
-        kubectl get pods -n ${{ env.NAMESPACE }} -o wide
-        
-        # 检查 node-exporter 状态
-        echo "=== Node-Exporter Status ==="
-        kubectl get daemonset -n ${{ env.NAMESPACE }} | grep node-exporter || echo "No node-exporter daemonset found"
-        kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=prometheus-node-exporter 2>/dev/null || echo "No node-exporter pods found"
-        
-        # 检查 Pod 详细状态（只检查前3个）
-        echo "=== Pod Events (first 3) ==="
-        for pod in $(kubectl get pods -n ${{ env.NAMESPACE }} --no-headers -o custom-columns=":metadata.name" | head -3); do
-          echo "--- Pod: $pod ---"
-          kubectl describe pod $pod -n ${{ env.NAMESPACE }} | grep -A 5 "Events:" || echo "No events found"
-        done
-        
-        # 检查 PVC 状态
-        echo "=== PVC Status ==="
-        kubectl get pvc -n ${{ env.NAMESPACE }} -o wide 2>/dev/null || echo "No PVCs found"
-        
-        # 检查服务状态
-        echo "=== Service Status ==="
-        kubectl get services -n ${{ env.NAMESPACE }}
-        
-        # 检查最近的事件
-        echo "=== Recent Events (last 10) ==="
-        kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp | tail -10
-
-    - name: Deploy Ingress resources
-      if: steps.helm-deploy.outputs.helm_status == 'success'
-      run: |
-        echo "🚀 Deploying Ingress resources..."
-        kubectl apply -f kubernetes/ingress/ -n ${{ env.NAMESPACE }}
-
-    - name: Wait for ALB provisioning
-      if: steps.helm-deploy.outputs.helm_status == 'success'
-      run: |
-        echo "⏳ Waiting for ALB provisioning..."
-        
-        # 等待 ALB 创建，带超时
-        max_wait=300
-        wait_time=0
-        alb_provisioned=false
-        
-        while [ $wait_time -lt $max_wait ]; do
-          ALB_HOSTNAME=$(kubectl get ingress grafana-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
-          if [ -n "$ALB_HOSTNAME" ]; then
-            echo "✅ ALB provisioned: $ALB_HOSTNAME"
-            alb_provisioned=true
-            break
-          fi
-          echo "Waiting for ALB... (elapsed: ${wait_time}s)"
+      - name: Simple Fix
+        run: |
           sleep 30
-          wait_time=$((wait_time + 30))
-        done
-        
-        if [ "$alb_provisioned" = false ]; then
-          echo "❌ ALB provisioning timeout after ${max_wait}s"
-        fi
-        
-        echo "ALB Status:"
-        kubectl get ingress -n ${{ env.NAMESPACE }}
+          kubectl delete daemonset kube-prometheus-stack-prometheus-node-exporter -n monitoring --ignore-not-found=true
+          echo "Deleted old node-exporter"
 
-    - name: Final health check
-      if: steps.helm-deploy.outputs.helm_status == 'success'
-      run: |
-        echo "🏥 Running final health check..."
-        if [ -f "scripts/health-check.sh" ]; then
-          chmod +x scripts/health-check.sh
-          ./scripts/health-check.sh
-        else
-          echo "ℹ️ No health-check script found, skipping"
-        fi
-
-    - name: Get ALB endpoints
-      if: steps.helm-deploy.outputs.helm_status == 'success'
-      id: endpoints
-      run: |
-        GRAFANA_ALB=$(kubectl get ingress grafana-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
-        PROMETHEUS_ALB=$(kubectl get ingress prometheus-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
-        ALERTMANAGER_ALB=$(kubectl get ingress alertmanager-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
-        
-        echo "grafana_alb=$GRAFANA_ALB" >> $GITHUB_OUTPUT
-        echo "prometheus_alb=$PROMETHEUS_ALB" >> $GITHUB_OUTPUT
-        echo "alertmanager_alb=$ALERTMANAGER_ALB" >> $GITHUB_OUTPUT
-        
-        echo "Grafana ALB: $GRAFANA_ALB"
-        echo "Prometheus ALB: $PROMETHEUS_ALB"
-        echo "Alertmanager ALB: $ALERTMANAGER_ALB"
-
-    - name: Create deployment summary
-      if: always()
-      run: |
-        # 使用简单的 echo 输出部署结果，避免 github-script 的问题
-        HELM_STATUS="${{ steps.helm-deploy.outputs.helm_status }}"
-        GRAFANA_ALB="${{ steps.endpoints.outputs.grafana_alb }}"
-        PROMETHEUS_ALB="${{ steps.endpoints.outputs.prometheus_alb }}"
-        ALERTMANAGER_ALB="${{ steps.endpoints.outputs.alertmanager_alb }}"
-        
-        echo "=========================================="
-        echo "         DEPLOYMENT SUMMARY"
-        echo "=========================================="
-        
-        if [ "$HELM_STATUS" = "success" ]; then
-          echo "🎉 Monitoring Stack with ALB 部署完成!"
-          echo ""
-          echo "ALB 访问地址:"
-          echo "📊 Grafana: http://$GRAFANA_ALB"
-          echo "📈 Prometheus: http://$PROMETHEUS_ALB" 
-          echo "🚨 Alertmanager: http://$ALERTMANAGER_ALB"
-          echo ""
-          echo "登录信息:"
-          echo "Grafana 用户名: ${{ secrets.GRAFANA_ADMIN_USER }}"
-          echo "Grafana 密码: [已设置]"
-          echo ""
-          echo "组件状态:"
-          echo "- Grafana: ✅ 运行中"
-          echo "- Prometheus: ✅ 运行中" 
-          echo "- Alertmanager: ✅ 运行中"
-          echo "- Node-Exporter: ✅ 在2个节点上运行"
-          echo ""
-          echo "下一步:"
-          echo "1. 等待 ALB DNS 传播（可能需要几分钟）"
-          echo "2. 在浏览器中访问上述 URL"
-          echo "3. 根据需要配置额外的仪表板和告警"
-        else
-          echo "❌ Monitoring Stack 部署失败"
-          echo ""
-          echo "可能的原因:"
-          echo "1. Helm 安装超时"
-          echo "2. 集群资源不足"
-          echo "3. 网络问题导致镜像拉取失败"
-          echo "4. 存储类配置问题"
-          echo "5. Helm 操作被卡住（需要手动清理）"
-          echo ""
-          echo "请检查上面的日志了解具体错误信息。"
-        fi
-        echo "=========================================="
-
-    - name: Upload deployment logs
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: deployment-logs
-        path: |
-          ${{ github.workspace }}/**/*.log
-        retention-days: 7
+      - name: Check Result
+        run: |
+          echo "=== All Pods ==="
+          kubectl get pods -n monitoring
