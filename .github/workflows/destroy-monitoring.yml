@@ -1,0 +1,111 @@
+name: Destroy Monitoring Stack
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '环境'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - staging
+        - production
+      confirm_destroy:
+        description: '确认删除 (输入 "DESTROY" 确认)'
+        required: true
+        type: string
+
+env:
+  CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  NAMESPACE: monitoring
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'production' }}
+    
+    # 只有在确认输入正确时才运行
+    if: ${{ github.event.inputs.confirm_destroy == 'DESTROY' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig \
+          --region ${{ env.AWS_REGION }} \
+          --name ${{ env.CLUSTER_NAME }}
+
+    - name: Setup Helm
+      uses: azure/setup-helm@v3
+
+    - name: Uninstall Helm releases
+      run: |
+        echo "🗑️ Uninstalling Helm releases..."
+        helm uninstall kube-prometheus-stack -n ${{ env.NAMESPACE }} --ignore-not-found=true
+
+    - name: Delete Ingress resources
+      run: |
+        echo "🗑️ Deleting Ingress resources (this will delete ALB)..."
+        kubectl delete -f kubernetes/ingress/ -n ${{ env.NAMESPACE }} --ignore-not-found=true
+
+    - name: Wait for resource cleanup
+      run: |
+        echo "⏳ Waiting for resource cleanup..."
+        sleep 60
+
+    - name: Cleanup PVCs and secrets
+      run: |
+        echo "🗑️ Cleaning up Persistent Volume Claims..."
+        kubectl delete pvc -n ${{ env.NAMESPACE }} --all --ignore-not-found=true
+        
+        echo "🗑️ Cleaning up secrets..."
+        kubectl delete secret grafana-admin-secret -n ${{ env.NAMESPACE }} --ignore-not-found=true
+
+    - name: Delete namespace
+      run: |
+        echo "🗑️ Deleting namespace..."
+        kubectl delete namespace ${{ env.NAMESPACE }} --ignore-not-found=true
+
+    - name: Confirm deletion
+      run: |
+        echo "✅ Cleanup completed!"
+        echo "Checking remaining resources:"
+        kubectl get namespaces | grep ${{ env.NAMESPACE }} || echo "Namespace ${{ env.NAMESPACE }} deleted"
+        helm list -n ${{ env.NAMESPACE }} | grep kube-prometheus-stack || echo "Helm release deleted"
+
+    - name: Create cleanup summary
+      if: always()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `🧹 Monitoring Stack 清理完成!\n\n所有资源已从集群中删除:\n- Helm releases\n- Ingress resources (ALB)\n- Persistent Volume Claims\n- Secrets\n- Namespace\n\n如需重新部署，请再次运行部署工作流。`
+          });
+
+  pre-destroy-check:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'production' }}
+    
+    # 检查确认输入
+    if: ${{ github.event.inputs.confirm_destroy != 'DESTROY' }}
+    
+    steps:
+    - name: Check destruction confirmation
+      run: |
+        echo "❌ 销毁操作未确认!"
+        echo "请在确认输入框中输入 'DESTROY' 来确认删除操作"
+        exit 1

@@ -1,0 +1,138 @@
+name: Deploy Monitoring Stack with ALB
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'charts/**'
+      - 'kubernetes/**'
+      - '.github/workflows/deploy-monitoring.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '部署环境'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - staging
+        - production
+
+env:
+  CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  NAMESPACE: monitoring
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'production' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig \
+          --region ${{ env.AWS_REGION }} \
+          --name ${{ env.CLUSTER_NAME }}
+
+    - name: Setup kubectl and Helm
+      run: |
+        # 安装 kubectl
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+        
+        # 安装 Helm
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        chmod 700 get_helm.sh
+        ./get_helm.sh
+
+    - name: Verify AWS Load Balancer Controller
+      run: |
+        echo "🔍 Checking existing AWS Load Balancer Controller..."
+        kubectl get pods -A | grep aws-load-balancer-controller || echo "❌ AWS Load Balancer Controller not found"
+
+    - name: Create monitoring namespace
+      run: |
+        kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Create Grafana secret
+      run: |
+        kubectl create secret generic grafana-admin-secret \
+          --namespace=${{ env.NAMESPACE }} \
+          --from-literal=admin-user=${{ secrets.GRAFANA_ADMIN_USER }} \
+          --from-literal=admin-password=${{ secrets.GRAFANA_ADMIN_PASSWORD }} \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Add Helm repositories
+      run: |
+        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+        helm repo update
+
+    - name: Deploy kube-prometheus-stack
+      run: |
+        helm upgrade --install kube-prometheus-stack \
+          prometheus-community/kube-prometheus-stack \
+          --namespace ${{ env.NAMESPACE }} \
+          --version 48.1.1 \
+          --values charts/kube-prometheus-stack/values-alb.yaml \
+          --wait \
+          --timeout 20m
+
+    - name: Deploy Ingress resources
+      run: |
+        kubectl apply -f kubernetes/ingress/ -n ${{ env.NAMESPACE }}
+
+    - name: Wait for ALB provisioning
+      run: |
+        echo "⏳ Waiting for ALB to be provisioned..."
+        # 等待 ALB 创建
+        timeout 300s bash -c 'until kubectl get ingress -n ${{ env.NAMESPACE }} grafana-ingress -o jsonpath="{.status.loadBalancer.ingress[0].hostname}" 2>/dev/null; do sleep 10; echo "Waiting..."; done'
+        
+        echo "ALB Status:"
+        kubectl get ingress -n ${{ env.NAMESPACE }}
+
+    - name: Health check
+      run: |
+        chmod +x scripts/health-check.sh
+        ./scripts/health-check.sh
+
+    - name: Get ALB endpoints
+      id: endpoints
+      run: |
+        GRAFANA_ALB=$(kubectl get ingress grafana-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+        PROMETHEUS_ALB=$(kubectl get ingress prometheus-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+        ALERTMANAGER_ALB=$(kubectl get ingress alertmanager-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+        
+        echo "grafana_alb=$GRAFANA_ALB" >> $GITHUB_OUTPUT
+        echo "prometheus_alb=$PROMETHEUS_ALB" >> $GITHUB_OUTPUT
+        echo "alertmanager_alb=$ALERTMANAGER_ALB" >> $GITHUB_OUTPUT
+        
+        echo "Grafana ALB: $GRAFANA_ALB"
+        echo "Prometheus ALB: $PROMETHEUS_ALB"
+        echo "Alertmanager ALB: $ALERTMANAGER_ALB"
+
+    - name: Create deployment summary
+      if: always()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const grafanaAlb = '${{ steps.endpoints.outputs.grafana_alb }}';
+          const prometheusAlb = '${{ steps.endpoints.outputs.prometheus_alb }}';
+          const alertmanagerAlb = '${{ steps.endpoints.outputs.alertmanager_alb }}';
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `🎉 Monitoring Stack with ALB 部署完成!\n\n**ALB 访问地址:**\n- 📊 Grafana: http://${grafanaAlb}\n- 📈 Prometheus: http://${prometheusAlb}\n- 🚨 Alertmanager: http://${alertmanagerAlb}\n\n**登录信息:**\n- Grafana 用户名: \`${{ secrets.GRAFANA_ADMIN_USER }}\`\n- Grafana 密码: \`${{ secrets.GRAFANA_ADMIN_PASSWORD }}\`\n\n**注意:**\n- 这些是 ALB 的直接 DNS 名称，无需额外 DNS 配置\n- 如需 HTTPS，请配置 ACM 证书并更新 Ingress 注解`
+          });

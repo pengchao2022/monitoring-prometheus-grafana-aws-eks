@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: monitoring-restrict-access
+  namespace: monitoring
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  # 允许来自相同命名空间的流量
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+  # 允许来自 kube-system (ALB Controller, CoreDNS等) 的流量
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+  # 允许来自 ALB 的流量 (基于安全组)
+  - from:
+    - ipBlock:
+        cidr: 10.0.0.0/8  # 根据您的 VPC CIDR 调整
+  # 允许监控端口
+  ports:
+  - port: 3000  # Grafana
+    protocol: TCP
+  - port: 9090  # Prometheus
+    protocol: TCP
+  - port: 9093  # Alertmanager
+    protocol: TCP
+  - port: 9100  # Node Exporter
+    protocol: TCP

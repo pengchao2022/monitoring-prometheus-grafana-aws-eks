@@ -1,0 +1,197 @@
+# kube-prometheus-stack values for ALB integration
+
+# Grafana 配置 - 使用 ClusterIP，通过 ALB 暴露
+grafana:
+  enabled: true
+  admin:
+    existingSecret: "grafana-admin-secret"
+    userKey: "admin-user"
+    passwordKey: "admin-password"
+  
+  # 使用 ClusterIP，通过 Ingress 暴露
+  service:
+    type: ClusterIP
+    port: 3000
+    targetPort: 3000
+    annotations: {}
+  
+  # 禁用默认的 Ingress，使用自定义的
+  ingress:
+    enabled: false
+  
+  persistence:
+    enabled: true
+    storageClassName: "gp2"
+    size: 10Gi
+  
+  # Grafana 配置
+  grafana.ini:
+    server:
+      domain: "localhost"  # 使用 ALB 直接访问，不需要域名
+      root_url: "%(protocol)s://%(domain)s/"
+      serve_from_sub_path: false
+    security:
+      disable_gravatar: true
+    auth:
+      disable_login_form: false
+    auth.anonymous:
+      enabled: false
+  
+  # 仪表板配置
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/default
+  
+  dashboards:
+    default:
+      kubernetes-cluster:
+        url: https://raw.githubusercontent.com/grafana/grafana/main/public/dashboards/0e64beb5d6d0cb2d21b78e6d6d9c1e59/revisions/1/download/kubernetes-cluster-prometheus_rev1.json
+      node-exporter:
+        gnetId: 1860
+        revision: 22
+        datasource: Prometheus
+  
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "200m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+
+# Prometheus 配置 - 使用 ClusterIP
+prometheus:
+  enabled: true
+  
+  service:
+    type: ClusterIP
+    port: 9090
+    targetPort: 9090
+    annotations: {}
+  
+  ingress:
+    enabled: false
+  
+  prometheusSpec:
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    retention: 7d
+    retentionSize: "15GB"
+    
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "500m"
+      limits:
+        memory: "4Gi"
+        cpu: "1000m"
+    
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp2
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 50Gi
+    
+    # 服务监控选择器
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector: {}
+
+# Alertmanager 配置
+alertmanager:
+  enabled: true
+  
+  service:
+    type: ClusterIP
+    port: 9093
+    targetPort: 9093
+    annotations: {}
+  
+  ingress:
+    enabled: false
+  
+  alertmanagerSpec:
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+    
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp2
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+# 默认启用所有组件
+defaultRules:
+  create: true
+  rules:
+    alertmanager: true
+    etcd: true
+    general: true
+    k8s: true
+    kubeApiserverAvailability: true
+    kubelet: true
+    kubeProxy: true
+    node: true
+    prometheus: true
+    prometheusOperator: true
+
+# 核心监控组件
+kubeApiServer:
+  enabled: true
+
+kubelet:
+  enabled: true
+
+kubeControllerManager:
+  enabled: true
+
+coreDns:
+  enabled: true
+
+kubeEtcd:
+  enabled: true
+
+kubeScheduler:
+  enabled: true
+
+kubeProxy:
+  enabled: true
+
+kubeStateMetrics:
+  enabled: true
+
+nodeExporter:
+  enabled: true
+
+prometheusNodeExporter:
+  enabled: true
+
+# Operator 配置
+prometheusOperator:
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
