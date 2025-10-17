@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
 
 env:
-  CLUSTER_NAME: your-cluster-name
-  AWS_REGION: us-east-1
+  CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
 
 jobs:
   deploy:
@@ -35,7 +35,7 @@ jobs:
         # 这里添加您的部署命令，例如：
         # helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
         # helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack -n monitoring --create-namespace
-        echo "Deploying monitoring stack..."
+        echo "Deploying monitoring stack to cluster: ${{ env.CLUSTER_NAME }}"
 
     - name: Wait for Ingress to be ready
       run: |
@@ -71,6 +71,7 @@ jobs:
         # 检查是否获取到地址
         if [ -z "$ELB_ADDRESS" ]; then
           echo "ERROR: Could not retrieve ELB address"
+          echo "Checking available ingresses:"
           kubectl get ingress -n monitoring -o wide
           exit 1
         fi
@@ -84,12 +85,14 @@ jobs:
         echo "🚀 Monitoring Stack Deployment Complete!"
         echo "=========================================="
         echo ""
+        echo "EKS Cluster: ${{ env.CLUSTER_NAME }}"
+        echo "AWS Region: ${{ env.AWS_REGION }}"
+        echo ""
         echo "📊 Prometheus URL: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/prometheus"
         echo "📈 Grafana URL: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/grafana"
         echo "🚨 Alertmanager URL: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/alertmanager"
         echo ""
-        echo "🔧 Debug Information:"
-        echo "Full ELB Address: ${{ steps.get_elb.outputs.ELB_ADDRESS }}"
+        echo "🔧 Full ELB Address: ${{ steps.get_elb.outputs.ELB_ADDRESS }}"
         echo ""
         echo "=========================================="
 
@@ -110,5 +113,5 @@ jobs:
         echo "=== Ingress Details ==="
         kubectl get ingress -n monitoring -o wide
         echo ""
-        echo "=== Ingress YAML ==="
-        kubectl get ingress -n monitoring -o yaml
+        echo "=== Services Details ==="
+        kubectl get services -n monitoring
