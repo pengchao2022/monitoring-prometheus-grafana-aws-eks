@@ -9,6 +9,10 @@ env:
   CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
   AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -25,17 +29,27 @@ jobs:
         aws-region: ${{ env.AWS_REGION }}
 
     - name: Set up kubectl
-      uses: aws-actions/amazon-eks-setup-kubectl@v1
-      with:
-        cluster-name: ${{ env.CLUSTER_NAME }}
-        aws-region: ${{ env.AWS_REGION }}
+      run: |
+        # 安装 kubectl
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+        kubectl version --client
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
 
     - name: Deploy Monitoring Stack
       run: |
-        # 这里添加您的部署命令，例如：
+        echo "Deploying monitoring stack to cluster: ${{ env.CLUSTER_NAME }}"
+        # 这里添加您的实际部署命令
+        # 例如使用helm部署
         # helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
         # helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack -n monitoring --create-namespace
-        echo "Deploying monitoring stack to cluster: ${{ env.CLUSTER_NAME }}"
+        
+        # 或者使用kubectl部署
+        kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+        echo "Monitoring namespace created/verified"
 
     - name: Wait for Ingress to be ready
       run: |
