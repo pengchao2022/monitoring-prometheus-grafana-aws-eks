@@ -53,7 +53,7 @@ jobs:
         sudo mv kubectl /usr/local/bin/
         
         # 安装 Helm
-        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3"
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
         chmod 700 get_helm.sh
         ./get_helm.sh
         
@@ -91,7 +91,7 @@ jobs:
         
         # 强制删除任何残留的 Helm 操作
         echo "Force cleaning any remaining Helm operations..."
-        helm list -n monitoring --pending --output json | jq -r '.[].name' | while read release; do
+        helm list -n monitoring --pending --output json 2>/dev/null | jq -r '.[].name' 2>/dev/null | while read release; do
           echo "Force cleaning release: $release"
           helm rollback "$release" -n monitoring --cleanup-on-fail --force 2>/dev/null || true
         done
