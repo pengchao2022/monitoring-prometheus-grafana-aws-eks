@@ -52,9 +52,30 @@ jobs:
         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
         
         # 安装 Helm
-        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3"
         chmod 700 get_helm.sh
         ./get_helm.sh
+
+    - name: Pre-deployment cluster check
+      run: |
+        echo "🔍 Pre-deployment Cluster Diagnostics"
+        echo "====================================="
+        
+        # 检查节点状态
+        echo "=== Node Status ==="
+        kubectl get nodes -o wide
+        
+        # 检查节点资源
+        echo "=== Node Resources ==="
+        kubectl describe nodes | grep -A 5 "Allocated resources" || echo "Resource info not available"
+        
+        # 检查存储类
+        echo "=== Storage Classes ==="
+        kubectl get storageclass
+        
+        # 检查现有命名空间
+        echo "=== Existing Monitoring Namespace ==="
+        kubectl get namespace ${{ env.NAMESPACE }} || echo "Namespace does not exist yet"
 
     - name: Verify AWS Load Balancer Controller
       run: |
@@ -78,35 +99,134 @@ jobs:
         helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
         helm repo update
 
-    - name: Deploy kube-prometheus-stack
+    - name: Deploy kube-prometheus-stack with timeout
+      id: helm-install
       run: |
-        helm upgrade --install kube-prometheus-stack \
-          prometheus-community/kube-prometheus-stack \
-          --namespace ${{ env.NAMESPACE }} \
-          --version 48.1.1 \
-          --values charts/kube-prometheus-stack/values-alb.yaml \
-          --wait \
-          --timeout 20m
+        echo "🚀 Starting kube-prometheus-stack installation..."
+        echo "Start time: $(date)"
+        
+        # 设置超时和重试逻辑
+        timeout 600s bash -c '
+          for i in {1..3}; do
+            echo "Attempt $i of 3..."
+            if helm upgrade --install kube-prometheus-stack \
+              prometheus-community/kube-prometheus-stack \
+              --namespace ${{ env.NAMESPACE }} \
+              --version 48.1.1 \
+              --values charts/kube-prometheus-stack/values-alb.yaml \
+              --wait \
+              --timeout 15m \
+              --atomic \
+              --create-namespace; then
+              echo "✅ Helm installation successful on attempt $i"
+              exit 0
+            else
+              echo "❌ Helm installation failed on attempt $i"
+              if [[ $i -lt 3 ]]; then
+                echo "Waiting 30 seconds before retry..."
+                sleep 30
+              fi
+            fi
+          done
+          echo "❌ All installation attempts failed"
+          exit 1
+        '
+        
+        echo "Completion time: $(date)"
+
+    - name: Real-time installation monitoring
+      if: always()
+      run: |
+        echo "📊 Real-time Installation Monitoring"
+        echo "==================================="
+        
+        # 持续监控 Pod 状态
+        for i in {1..12}; do
+          echo "--- Status check $i --- $(date)"
+          echo "Pods:"
+          kubectl get pods -n ${{ env.NAMESPACE }} --sort-by=.status.startTime | head -10
+          
+          echo "Events:"
+          kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp --field-selector type=Warning 2>/dev/null | tail -5 || echo "No warning events"
+          
+          # 检查镜像拉取状态
+          echo "Image Pull Status:"
+          kubectl get pods -n ${{ env.NAMESPACE }} -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{range .status.containerStatuses[*]}{.state.waiting.reason}{" "}{.state.waiting.message}{"\t"}{end}{"\n"}{end}' 2>/dev/null || echo "Cannot get detailed status"
+          
+          if [[ $i -lt 12 ]]; then
+            sleep 10
+          fi
+        done
+
+    - name: Post-installation diagnostics
+      if: always()
+      run: |
+        echo "🔍 Post-installation Diagnostics"
+        echo "================================"
+        
+        # 检查 Helm release 状态
+        echo "=== Helm Release Status ==="
+        helm list -n ${{ env.NAMESPACE }} || echo "Helm release not found"
+        
+        # 详细 Pod 诊断
+        echo "=== Detailed Pod Diagnostics ==="
+        kubectl get pods -n ${{ env.NAMESPACE }} -o wide
+        
+        # 检查 Pod 详细状态
+        for pod in $(kubectl get pods -n ${{ env.NAMESPACE }} --no-headers -o custom-columns=":metadata.name"); do
+          echo "--- Diagnosing pod: $pod ---"
+          kubectl describe pod $pod -n ${{ env.NAMESPACE }} | grep -A 10 "Events:" || echo "No events found"
+          
+          # 检查容器状态
+          kubectl get pod $pod -n ${{ env.NAMESPACE }} -o jsonpath='{range .status.containerStatuses[*]}{.name}{": "}{.state}{"\n"}{end}' 2>/dev/null || echo "Cannot get container status"
+        done
+        
+        # 检查 PVC 状态
+        echo "=== PVC Status ==="
+        kubectl get pvc -n ${{ env.NAMESPACE }} -o wide
+        
+        # 检查服务状态
+        echo "=== Service Status ==="
+        kubectl get services -n ${{ env.NAMESPACE }}
+        
+        # 检查最近的事件
+        echo "=== Recent Events (last 20) ==="
+        kubectl get events -n ${{ env.NAMESPACE }} --sort-by=.lastTimestamp | tail -20
 
     - name: Deploy Ingress resources
+      if: steps.helm-install.outcome == 'success'
       run: |
         kubectl apply -f kubernetes/ingress/ -n ${{ env.NAMESPACE }}
 
     - name: Wait for ALB provisioning
+      if: steps.helm-install.outcome == 'success'
       run: |
-        echo "⏳ Waiting for ALB to be provisioned..."
-        # 等待 ALB 创建
-        timeout 300s bash -c 'until kubectl get ingress -n ${{ env.NAMESPACE }} grafana-ingress -o jsonpath="{.status.loadBalancer.ingress[0].hostname}" 2>/dev/null; do sleep 10; echo "Waiting..."; done'
+        echo "⏳ Waiting for ALB provisioning..."
+        
+        # 等待 ALB 创建，带超时
+        timeout 300s bash -c '
+          while true; do
+            ALB_HOSTNAME=$(kubectl get ingress grafana-ingress -n ${{ env.NAMESPACE }} -o jsonpath="{.status.loadBalancer.ingress[0].hostname}" 2>/dev/null)
+            if [[ -n "$ALB_HOSTNAME" ]]; then
+              echo "✅ ALB provisioned: $ALB_HOSTNAME"
+              break
+            fi
+            echo "Waiting for ALB... (current time: $(date))"
+            sleep 30
+          done
+        '
         
         echo "ALB Status:"
         kubectl get ingress -n ${{ env.NAMESPACE }}
 
-    - name: Health check
+    - name: Final health check
+      if: steps.helm-install.outcome == 'success'
       run: |
         chmod +x scripts/health-check.sh
         ./scripts/health-check.sh
 
     - name: Get ALB endpoints
+      if: steps.helm-install.outcome == 'success'
       id: endpoints
       run: |
         GRAFANA_ALB=$(kubectl get ingress grafana-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
@@ -126,13 +246,25 @@ jobs:
       uses: actions/github-script@v6
       with:
         script: |
+          const helmStatus = '${{ steps.helm-install.outcome }}';
           const grafanaAlb = '${{ steps.endpoints.outputs.grafana_alb }}';
           const prometheusAlb = '${{ steps.endpoints.outputs.prometheus_alb }}';
           const alertmanagerAlb = '${{ steps.endpoints.outputs.alertmanager_alb }}';
+          
+          let statusMessage = '';
+          let details = '';
+          
+          if (helmStatus === 'success') {
+            statusMessage = '🎉 Monitoring Stack with ALB 部署完成!';
+            details = `**ALB 访问地址:**\n- 📊 Grafana: http://${grafanaAlb}\n- 📈 Prometheus: http://${prometheusAlb}\n- 🚨 Alertmanager: http://${alertmanagerAlb}\n\n**登录信息:**\n- Grafana 用户名: \`${{ secrets.GRAFANA_ADMIN_USER }}\`\n- Grafana 密码: \`${{ secrets.GRAFANA_ADMIN_PASSWORD }}\``;
+          } else {
+            statusMessage = '❌ Monitoring Stack 部署失败';
+            details = 'Helm 安装过程中出现超时或错误。请检查诊断日志了解具体原因。';
+          }
           
           github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
-            body: `🎉 Monitoring Stack with ALB 部署完成!\n\n**ALB 访问地址:**\n- 📊 Grafana: http://${grafanaAlb}\n- 📈 Prometheus: http://${prometheusAlb}\n- 🚨 Alertmanager: http://${alertmanagerAlb}\n\n**登录信息:**\n- Grafana 用户名: \`${{ secrets.GRAFANA_ADMIN_USER }}\`\n- Grafana 密码: \`${{ secrets.GRAFANA_ADMIN_PASSWORD }}\`\n\n**注意:**\n- 这些是 ALB 的直接 DNS 名称，无需额外 DNS 配置\n- 如需 HTTPS，请配置 ACM 证书并更新 Ingress 注解`
+            body: `${statusMessage}\n\n${details}\n\n**诊断信息:**\n- Helm 安装结果: ${helmStatus}\n- 部署时间: 约 15 分钟（包含诊断）`
           });

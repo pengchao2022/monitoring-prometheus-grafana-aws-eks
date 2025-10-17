@@ -1,6 +1,11 @@
+# 优化版本 - 加快部署速度
 # kube-prometheus-stack values for ALB integration
 
-# Grafana 配置 - 使用 ClusterIP，通过 ALB 暴露
+# 全局配置
+global:
+  imagePullSecrets: []
+
+# Grafana 配置
 grafana:
   enabled: true
   admin:
@@ -8,67 +13,41 @@ grafana:
     userKey: "admin-user"
     passwordKey: "admin-password"
   
-  # 使用 ClusterIP，通过 Ingress 暴露
+  # 优化镜像配置
+  image:
+    repository: grafana/grafana
+    tag: "9.5.2"
+    pullPolicy: IfNotPresent
+  
   service:
     type: ClusterIP
     port: 3000
     targetPort: 3000
-    annotations: {}
   
-  # 禁用默认的 Ingress，使用自定义的
   ingress:
     enabled: false
   
+  # 首次部署禁用持久化以加快启动
   persistence:
-    enabled: true
-    storageClassName: "gp2"
-    size: 10Gi
+    enabled: false
   
-  # Grafana 配置
-  grafana.ini:
-    server:
-      domain: "localhost"  # 使用 ALB 直接访问，不需要域名
-      root_url: "%(protocol)s://%(domain)s/"
-      serve_from_sub_path: false
-    security:
-      disable_gravatar: true
-    auth:
-      disable_login_form: false
-    auth.anonymous:
+  # 禁用 sidecar 以加快启动
+  sidecar:
+    dashboards:
+      enabled: false
+    datasources:
       enabled: false
   
-  # 仪表板配置
-  dashboardProviders:
-    dashboardproviders.yaml:
-      apiVersion: 1
-      providers:
-      - name: 'default'
-        orgId: 1
-        folder: ''
-        type: file
-        disableDeletion: false
-        editable: true
-        options:
-          path: /var/lib/grafana/dashboards/default
-  
-  dashboards:
-    default:
-      kubernetes-cluster:
-        url: https://raw.githubusercontent.com/grafana/grafana/main/public/dashboards/0e64beb5d6d0cb2d21b78e6d6d9c1e59/revisions/1/download/kubernetes-cluster-prometheus_rev1.json
-      node-exporter:
-        gnetId: 1860
-        revision: 22
-        datasource: Prometheus
-  
+  # 优化资源请求
   resources:
     requests:
-      memory: "512Mi"
-      cpu: "200m"
+      memory: "256Mi"
+      cpu: "100m"
     limits:
-      memory: "1Gi"
+      memory: "512Mi"
       cpu: "500m"
 
-# Prometheus 配置 - 使用 ClusterIP
+# Prometheus 配置
 prometheus:
   enabled: true
   
@@ -76,38 +55,37 @@ prometheus:
     type: ClusterIP
     port: 9090
     targetPort: 9090
-    annotations: {}
   
   ingress:
     enabled: false
   
   prometheusSpec:
-    scrapeInterval: 30s
-    evaluationInterval: 30s
-    retention: 7d
-    retentionSize: "15GB"
+    # 优化配置
+    scrapeInterval: 60s
+    evaluationInterval: 60s
+    retention: 2d
+    retentionSize: "5GB"
     
+    # 减少副本数
+    replicas: 1
+    
+    # 首次部署禁用持久化
+    storageSpec: {}
+    
+    # 优化资源请求
     resources:
       requests:
-        memory: "2Gi"
-        cpu: "500m"
+        memory: "512Mi"
+        cpu: "250m"
       limits:
-        memory: "4Gi"
-        cpu: "1000m"
+        memory: "1Gi"
+        cpu: "500m"
     
-    storageSpec:
-      volumeClaimTemplate:
-        spec:
-          storageClassName: gp2
-          accessModes: ["ReadWriteOnce"]
-          resources:
-            requests:
-              storage: 50Gi
-    
-    # 服务监控选择器
+    # 简化服务发现
     serviceMonitorSelectorNilUsesHelmValues: false
     serviceMonitorSelector: {}
-    serviceMonitorNamespaceSelector: {}
+    podMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelector: {}
 
 # Alertmanager 配置
 alertmanager:
@@ -117,81 +95,98 @@ alertmanager:
     type: ClusterIP
     port: 9093
     targetPort: 9093
-    annotations: {}
   
   ingress:
     enabled: false
   
   alertmanagerSpec:
+    # 减少副本数
+    replicas: 1
+    
+    # 禁用持久化
+    storage: {}
+    
+    # 优化资源请求
     resources:
       requests:
-        memory: "256Mi"
+        memory: "128Mi"
         cpu: "100m"
       limits:
-        memory: "512Mi"
-        cpu: "500m"
-    
-    storage:
-      volumeClaimTemplate:
-        spec:
-          storageClassName: gp2
-          accessModes: ["ReadWriteOnce"]
-          resources:
-            requests:
-              storage: 10Gi
+        memory: "256Mi"
+        cpu: "250m"
 
-# 默认启用所有组件
-defaultRules:
-  create: true
-  rules:
-    alertmanager: true
-    etcd: true
-    general: true
-    k8s: true
-    kubeApiserverAvailability: true
-    kubelet: true
-    kubeProxy: true
-    node: true
-    prometheus: true
-    prometheusOperator: true
+# 禁用非核心组件以加快部署
+kubeEtcd:
+  enabled: false
 
-# 核心监控组件
+kubeControllerManager:
+  enabled: false
+
+kubeScheduler:
+  enabled: false
+
+kubeProxy:
+  enabled: false
+
+# 核心监控组件（保持启用）
 kubeApiServer:
   enabled: true
 
 kubelet:
   enabled: true
 
-kubeControllerManager:
-  enabled: true
-
 coreDns:
-  enabled: true
-
-kubeEtcd:
-  enabled: true
-
-kubeScheduler:
-  enabled: true
-
-kubeProxy:
   enabled: true
 
 kubeStateMetrics:
   enabled: true
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "100m"
 
 nodeExporter:
   enabled: true
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "100m"
 
-prometheusNodeExporter:
-  enabled: true
+# 默认规则
+defaultRules:
+  create: true
+  rules:
+    alertmanager: true
+    etcd: false  # 禁用 etcd 规则
+    general: true
+    k8s: true
+    kubeApiserverAvailability: true
+    kubelet: true
+    node: true
+    prometheus: true
 
 # Operator 配置
 prometheusOperator:
   resources:
     requests:
-      memory: "256Mi"
+      memory: "128Mi"
       cpu: "100m"
     limits:
-      memory: "512Mi"
-      cpu: "500m"
+      memory: "256Mi"
+      cpu: "300m"
+  
+  # 优化镜像配置
+  image:
+    repository: prometheus-operator/prometheus-operator
+    tag: "v0.68.0"
+    pullPolicy: IfNotPresent
+
+  # 禁用 admission webhook 以加快启动
+  admissionWebhooks:
+    enabled: false
