@@ -82,7 +82,7 @@ spec:
         runAsGroup: 65534
         runAsNonRoot: true
         runAsUser: 65534
-      serviceAccountName: kube-prometheus-stack-prometheus-node-exporter
+      serviceAccountName: node-exporter-limited
       volumes:
       - hostPath:
           path: /proc

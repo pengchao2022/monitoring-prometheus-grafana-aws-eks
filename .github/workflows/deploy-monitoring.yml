@@ -79,10 +79,22 @@ jobs:
       run: |
         kubectl delete daemonset kube-prometheus-stack-prometheus-node-exporter -n monitoring --ignore-not-found=true
         kubectl delete pod -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --ignore-not-found=true
+        kubectl delete daemonset node-exporter-limited -n monitoring --ignore-not-found=true
+
+    - name: Deploy Node Exporter ServiceAccount and RBAC
+      run: |
+        kubectl apply -f kubernetes/serviceaccount/node-exporter-serviceaccount.yaml -n monitoring
 
     - name: Deploy custom Node Exporter
       run: |
         kubectl apply -f kubernetes/node-exporter/daemonset-limited.yaml -n monitoring
+
+    - name: Wait for Node Exporter to be ready
+      run: |
+        sleep 30
+        echo "Checking Node Exporter status..."
+        kubectl get daemonset node-exporter-limited -n monitoring
+        kubectl get pods -n monitoring -l app.kubernetes.io/name=node-exporter -o wide
 
     - name: Deploy additional Kubernetes manifests
       run: |
@@ -142,5 +154,8 @@ jobs:
         echo "📊 Prometheus: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/prometheus"
         echo "📈 Grafana: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/grafana"
         echo "🚨 Alertmanager: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/alertmanager"
+        echo ""
+        echo "Node Exporter Status:"
+        kubectl get pods -n monitoring -l app.kubernetes.io/name=node-exporter
         echo ""
         echo "Grafana凭据请查看GitHub Secrets"
