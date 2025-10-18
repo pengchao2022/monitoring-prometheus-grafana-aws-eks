@@ -44,11 +44,11 @@ git clone https://github.com/pengchao2022/monitoring-prometheus-grafana-aws-eks.
 
 - You need to have the following pods running on your monitoring namesapce
 
-![Pod截图](./eks_pods.png)
+![Pod截图](./eks_monitoring_pods.png)
 
 - Here's Grafana for EKS Cluster activities
 
-![Pod截图](./grafana.png)
+![Pod截图](./Grafana.png)
 
 - Here's Prometheus targets display
 
