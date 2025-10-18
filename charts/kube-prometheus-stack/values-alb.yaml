@@ -5,7 +5,7 @@ global:
 # Grafana 配置
 grafana:
   enabled: true
-  
+  replicaCount: 1
   # 使用GitHub Secrets中的凭据（通过--set参数覆盖）
   admin:
     user: "admin"  # 默认值，会被GitHub Actions中的--set覆盖
