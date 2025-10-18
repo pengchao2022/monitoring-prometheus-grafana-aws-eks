@@ -146,6 +146,64 @@ jobs:
         echo "ELB_ADDRESS=$ELB_ADDRESS" >> $GITHUB_OUTPUT
         echo "ELB地址: $ELB_ADDRESS"
 
+    - name: Configure Grafana for subpath support
+      run: |
+        echo "=== 配置Grafana支持子路径 ==="
+        
+        ELB_ADDRESS="${{ steps.get_elb.outputs.ELB_ADDRESS }}"
+        
+        if [ -n "$ELB_ADDRESS" ]; then
+          echo "配置Grafana使用ALB地址: $ELB_ADDRESS"
+          
+          # 更新Grafana ConfigMap以支持子路径
+          kubectl patch configmap kube-prometheus-stack-grafana -n monitoring --type=merge -p="{\"data\":{\"grafana.ini\":\"[analytics]\\ncheck_for_updates = true\\n[grafana_net]\\nurl = https://grafana.net\\n[log]\\nmode = console\\n[paths]\\ndata = /var/lib/grafana/\\nlogs = /var/log/grafana\\nplugins = /var/lib/grafana/plugins\\nprovisioning = /etc/grafana/provisioning\\n[server]\\ndomain = $ELB_ADDRESS\\nroot_url = %%(protocol)s://%%(domain)s/grafana/\\nserve_from_sub_path = true\\n\"}}"
+          
+          # 重启Grafana以应用配置
+          echo "重启Grafana Pod..."
+          kubectl rollout restart deployment kube-prometheus-stack-grafana -n monitoring
+          
+          # 等待Grafana重启完成
+          echo "等待Grafana重启完成..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=grafana -n monitoring --timeout=300s
+          
+          echo "✅ Grafana子路径配置完成"
+        else
+          echo "❌ 无法获取ELB地址，跳过Grafana配置"
+        fi
+
+    - name: Update Prometheus and Alertmanager external URLs
+      run: |
+        echo "=== 更新Prometheus和Alertmanager的外部URL ==="
+        
+        ELB_ADDRESS="${{ steps.get_elb.outputs.ELB_ADDRESS }}"
+        
+        if [ -n "$ELB_ADDRESS" ]; then
+          # 更新Prometheus externalUrl
+          kubectl get prometheus kube-prometheus-stack-prometheus -n monitoring && \
+          kubectl patch prometheus kube-prometheus-stack-prometheus -n monitoring --type='merge' \
+            -p='{"spec":{"externalUrl":"http://'$ELB_ADDRESS'/prometheus","routePrefix":"/prometheus"}}' || \
+          echo "Prometheus资源不存在，跳过"
+          
+          # 更新Alertmanager externalUrl
+          kubectl get alertmanager kube-prometheus-stack-alertmanager -n monitoring && \
+          kubectl patch alertmanager kube-prometheus-stack-alertmanager -n monitoring --type='merge' \
+            -p='{"spec":{"externalUrl":"http://'$ELB_ADDRESS'/alertmanager","routePrefix":"/alertmanager"}}' || \
+          echo "Alertmanager资源不存在，跳过"
+          
+          echo "✅ 外部URL更新完成"
+        else
+          echo "❌ 无法获取ELB地址，跳过URL更新"
+        fi
+
+    - name: Restart monitoring services
+      run: |
+        echo "=== 重启监控服务以应用配置 ==="
+        # 重启Prometheus（如果存在）
+        kubectl delete pod -n monitoring -l app.kubernetes.io/name=prometheus --ignore-not-found=true || echo "没有Prometheus Pod"
+        # 重启Alertmanager（如果存在）
+        kubectl delete pod -n monitoring -l app.kubernetes.io/name=alertmanager --ignore-not-found=true || echo "没有Alertmanager Pod"
+        sleep 30
+
     - name: Output access information
       run: |
         echo "=========================================="
@@ -160,7 +218,11 @@ jobs:
         echo "📈 Grafana: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/grafana"
         echo "🚨 Alertmanager: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/alertmanager"
         echo ""
-        echo "如果路径访问有问题，请检查Ingress配置的路径规则"
+        echo "Grafana默认凭据："
+        echo "用户名: admin"
+        echo "密码: prom-operator"
+        echo ""
+        echo "如果Grafana页面显示空白，请等待几分钟让配置生效"
 
     - name: Final verification
       run: |
@@ -173,3 +235,6 @@ jobs:
         echo ""
         echo "=== Ingress详情 ==="
         kubectl get ingress -n monitoring -o wide
+        echo ""
+        echo "=== Grafana配置检查 ==="
+        kubectl get configmap kube-prometheus-stack-grafana -n monitoring -o jsonpath='{.data.grafana\.ini}' | grep -A 5 "\\[server\\]"
