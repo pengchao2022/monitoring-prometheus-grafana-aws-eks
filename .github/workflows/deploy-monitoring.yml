@@ -155,16 +155,24 @@ jobs:
         if [ -n "$ELB_ADDRESS" ]; then
           echo "配置Grafana使用ALB地址: $ELB_ADDRESS"
           
-          # 更新Grafana ConfigMap以支持子路径
-          kubectl patch configmap kube-prometheus-stack-grafana -n monitoring --type=merge -p="{\"data\":{\"grafana.ini\":\"[analytics]\\ncheck_for_updates = true\\n[grafana_net]\\nurl = https://grafana.net\\n[log]\\nmode = console\\n[paths]\\ndata = /var/lib/grafana/\\nlogs = /var/log/grafana\\nplugins = /var/lib/grafana/plugins\\nprovisioning = /etc/grafana/provisioning\\n[server]\\ndomain = $ELB_ADDRESS\\nroot_url = %%(protocol)s://%%(domain)s/grafana/\\nserve_from_sub_path = true\\n\"}}"
+          # 使用正确的URL格式，避免%符号问题
+          kubectl patch configmap kube-prometheus-stack-grafana -n monitoring --type=merge \
+            --patch '{"data":{"grafana.ini":"[server]\ndomain = '"$ELB_ADDRESS"'\nroot_url = http://'"$ELB_ADDRESS"'/grafana/\nserve_from_sub_path = true\n"}}'
           
-          # 重启Grafana以应用配置
+          # 重启Grafana
           echo "重启Grafana Pod..."
           kubectl rollout restart deployment kube-prometheus-stack-grafana -n monitoring
           
-          # 等待Grafana重启完成
-          echo "等待Grafana重启完成..."
-          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=grafana -n monitoring --timeout=300s
+          # 等待重启
+          echo "等待Grafana重启..."
+          sleep 60
+          
+          # 检查状态和日志
+          echo "Grafana Pod状态:"
+          kubectl get pod -n monitoring -l app.kubernetes.io/name=grafana
+          
+          echo "Grafana Pod日志:"
+          kubectl logs -n monitoring -l app.kubernetes.io/name=grafana --tail=10
           
           echo "✅ Grafana子路径配置完成"
         else
@@ -237,4 +245,4 @@ jobs:
         kubectl get ingress -n monitoring -o wide
         echo ""
         echo "=== Grafana配置检查 ==="
-        kubectl get configmap kube-prometheus-stack-grafana -n monitoring -o jsonpath='{.data.grafana\.ini}' | grep -A 5 "\\[server\\]"
+        kubectl get configmap kube-prometheus-stack-grafana -n monitoring -o jsonpath='{.data.grafana\.ini}' | grep -A 3 "\\[server\\]"
