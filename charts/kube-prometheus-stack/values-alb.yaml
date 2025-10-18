@@ -109,11 +109,11 @@ alertmanager:
     # 大幅减少资源请求
     resources:
       requests:
-        memory: "128Mi"
-        cpu: "100m"
-      limits:
         memory: "256Mi"
-        cpu: "200m"
+        cpu: "150m"
+      limits:
+        memory: "512Mi"
+        cpu: "400m"
 
 # 禁用非核心组件以加快部署
 kubeEtcd:
@@ -142,11 +142,11 @@ kubeStateMetrics:
   enabled: true
   resources:
     requests:
-      memory: "32Mi"
-      cpu: "25m"
-    limits:
       memory: "64Mi"
       cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "100m"
 
 # Node Exporter 配置 - 关键：确保节点选择器在 CICD 中生效
 nodeExporter:
@@ -164,11 +164,11 @@ nodeExporter:
   # 优化资源请求
   resources:
     requests:
-      memory: "16Mi"  # 进一步减少
-      cpu: "10m"
+      memory: "64Mi"  # 进一步减少
+      cpu: "100m"
     limits:
-      memory: "32Mi"
-      cpu: "25m"
+      memory: "128Mi"
+      cpu: "125m"
 
 # 默认规则 - 重新启用节点相关规则
 defaultRules:
@@ -190,11 +190,11 @@ defaultRules:
 prometheusOperator:
   resources:
     requests:
-      memory: "64Mi"
-      cpu: "50m"
-    limits:
       memory: "128Mi"
       cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
 
   # 启用 admission webhook 以解决 TLS secret 问题
   admissionWebhooks:
