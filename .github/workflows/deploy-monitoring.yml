@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  Deploy-Prometheus-Grafana-Helm:
     runs-on: ubuntu-latest
     
     steps:
@@ -131,15 +131,14 @@ jobs:
     - name: Output access information
       run: |
         echo "=========================================="
-        echo "🚀 监控栈部署完成！"
+        echo "🚀 Deployment Finished"
         echo "=========================================="
         echo ""
         echo "集群: ${{ env.CLUSTER_NAME }}"
         echo "区域: ${{ env.AWS_REGION }}"
         echo ""
-        echo "使用以下URL访问监控面板："
         echo "📊 Prometheus: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/prometheus"
         echo "📈 Grafana: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/grafana"
         echo "🚨 Alertmanager: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/alertmanager"
         echo ""
-        echo "Grafana凭据请查看GitHub Secrets"
+        
