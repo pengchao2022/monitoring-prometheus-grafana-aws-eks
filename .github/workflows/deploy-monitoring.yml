@@ -8,6 +8,8 @@ on:
 env:
   CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
   AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+  GRAFANA_ADMIN_USER: ${{ secrets.GRAFANA_ADMIN_USER }}
+  GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
 
 permissions:
   id-token: write
@@ -58,25 +60,31 @@ jobs:
         helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
         helm repo update
 
+    - name: Debug GitHub Secrets
+      run: |
+        echo "=== 调试 GitHub Secrets ==="
+        echo "GRAFANA_ADMIN_USER: $GRAFANA_ADMIN_USER"
+        echo "GRAFANA_ADMIN_PASSWORD 长度: ${#GRAFANA_ADMIN_PASSWORD}"
+
     - name: Install kube-prometheus-stack with custom values
       run: |
-        # 直接使用 GitHub Secrets 安装
+        # 使用环境变量中的 GitHub Secrets
         if [ -f "charts/kube-prometheus-stack/values-alb.yaml" ]; then
           helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             -n monitoring \
             --create-namespace \
             -f charts/kube-prometheus-stack/values-alb.yaml \
             --set nodeExporter.enabled=false \
-            --set grafana.admin.user="${{ secrets.GRAFANA_ADMIN_USER }}" \
-            --set grafana.admin.password="${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            --set grafana.admin.user="$GRAFANA_ADMIN_USER" \
+            --set grafana.admin.password="$GRAFANA_ADMIN_PASSWORD" \
             --set grafana.admin.existingSecret=""
         else
           helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             -n monitoring \
             --create-namespace \
             --set nodeExporter.enabled=false \
-            --set grafana.admin.user="${{ secrets.GRAFANA_ADMIN_USER }}" \
-            --set grafana.admin.password="${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            --set grafana.admin.user="$GRAFANA_ADMIN_USER" \
+            --set grafana.admin.password="$GRAFANA_ADMIN_PASSWORD" \
             --set grafana.admin.existingSecret=""
         fi
 
@@ -98,19 +106,16 @@ jobs:
           
           echo "Secret 中的用户名: $USERNAME"
           echo "Secret 中的密码: [已隐藏]"
-          echo "GitHub Secrets 用户名: ${{ secrets.GRAFANA_ADMIN_USER }}"
+          echo "期望的用户名: $GRAFANA_ADMIN_USER"
           
           # 验证凭据是否匹配
-          if [ "$USERNAME" = "${{ secrets.GRAFANA_ADMIN_USER }}" ]; then
+          if [ "$USERNAME" = "$GRAFANA_ADMIN_USER" ]; then
             echo "✅ 用户名匹配成功"
           else
             echo "❌ 用户名不匹配"
-            echo "期望: ${{ secrets.GRAFANA_ADMIN_USER }}"
+            echo "期望: $GRAFANA_ADMIN_USER"
             echo "实际: $USERNAME"
           fi
-          
-          echo "密码长度: ${#PASSWORD} 字符"
-          echo "GitHub Secrets 密码长度: ${#{{ secrets.GRAFANA_ADMIN_PASSWORD }}} 字符"
         else
           echo "❌ Grafana Secret 不存在"
           exit 1
@@ -197,12 +202,8 @@ jobs:
         echo "🚨 Alertmanager: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/alertmanager"
         echo ""
         echo "Grafana登录凭据:"
-        echo "用户名: ${{ secrets.GRAFANA_ADMIN_USER }}"
-        echo "密码: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}"
-        echo ""
-        echo "如果登录遇到问题，请运行以下命令验证:"
-        echo "kubectl get secret kube-prometheus-stack-grafana -n monitoring -o jsonpath='{.data.admin-user}' | base64 --decode"
-        echo "kubectl get secret kube-prometheus-stack-grafana -n monitoring -o jsonpath='{.data.admin-password}' | base64 --decode"
+        echo "用户名: $GRAFANA_ADMIN_USER"
+        echo "密码: 请查看 GitHub Secrets 中的 GRAFANA_ADMIN_PASSWORD"
         echo ""
         echo "Node Exporter Status:"
         kubectl get pods -n monitoring -l app.kubernetes.io/name=node-exporter
