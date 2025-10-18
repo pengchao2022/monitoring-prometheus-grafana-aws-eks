@@ -38,10 +38,25 @@ git clone https://github.com/pengchao2022/monitoring-prometheus-grafana-aws-eks.
     - GRAFANA_ADMIN_USER
     - GRAFANA_ADMIN_PASSWORD
 
-- your EKS cluster will also need ebs-csi driver controller installed and alb-ingress-controller installed
+- Your EKS cluster will also need ebs-csi driver controller installed and alb-ingress-controller installed
 
 ## Reference
 
-- you need to have the following pods running on your monitoring namesapce
+- You need to have the following pods running on your monitoring namesapce
 
 ![Pod截图](./eks_pods.png)
+
+- Here's Grafana for EKS Cluster activities
+
+![Pod截图](./grafana.png)
+
+- Here's Prometheus targets display
+
+![Pod截图](./Prometheus.png)
+
+
+## Notice
+
+- Please be sure to use the PVC in grafana specially for a CICD process.
+
+- Written be Pengchao Ma 2025
