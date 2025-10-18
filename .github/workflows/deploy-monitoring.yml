@@ -64,13 +64,15 @@ jobs:
             --create-namespace \
             -f charts/kube-prometheus-stack/values-alb.yaml \
             --set nodeExporter.enabled=false \
-            --set grafana.adminPassword=${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+            --set grafana.admin.user=${{ secrets.GRAFANA_ADMIN_USER }} \
+            --set grafana.admin.password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         else
           helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             -n monitoring \
             --create-namespace \
             --set nodeExporter.enabled=false \
-            --set grafana.adminPassword=${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+            --set grafana.admin.user=${{ secrets.GRAFANA_ADMIN_USER }} \
+            --set grafana.admin.password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         fi
 
     - name: Clean up existing Node Exporter
@@ -141,4 +143,4 @@ jobs:
         echo "📈 Grafana: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/grafana"
         echo "🚨 Alertmanager: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/alertmanager"
         echo ""
-        
+        echo "Grafana凭据请查看GitHub Secrets"
