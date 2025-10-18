@@ -46,7 +46,7 @@ grafana:
       datasources:
       - name: Prometheus
         type: prometheus
-        url: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+        url: http://k8s-monitoring-ed67022bbc-1864281319.us-east-1.elb.amazonaws.com/prometheus
         access: proxy
         isDefault: true
   
