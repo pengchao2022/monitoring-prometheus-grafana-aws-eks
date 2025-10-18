@@ -48,7 +48,8 @@ git clone https://github.com/pengchao2022/monitoring-prometheus-grafana-aws-eks.
 
 - Here's Grafana for EKS Cluster activities
 
-![Pod截图](./Grafana.png)
+
+![Pod截图](grafana.jpg)
 
 - Here's Prometheus targets display
 
