@@ -42,6 +42,8 @@ jobs:
       run: |
         helm uninstall kube-prometheus-stack -n monitoring --ignore-not-found=true
         kubectl delete job kube-prometheus-stack-admission-patch -n monitoring --ignore-not-found=true
+        kubectl delete secret kube-prometheus-stack-grafana -n monitoring --ignore-not-found=true
+        kubectl delete pvc kube-prometheus-stack-grafana -n monitoring --ignore-not-found=true
 
     - name: Create monitoring namespace
       run: |
@@ -58,22 +60,48 @@ jobs:
 
     - name: Install kube-prometheus-stack with custom values
       run: |
+        # 先安装但不设置密码，让系统生成默认的
         if [ -f "charts/kube-prometheus-stack/values-alb.yaml" ]; then
           helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             -n monitoring \
             --create-namespace \
             -f charts/kube-prometheus-stack/values-alb.yaml \
-            --set nodeExporter.enabled=false \
-            --set grafana.admin.user=${{ secrets.GRAFANA_ADMIN_USER }} \
-            --set grafana.admin.password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+            --set nodeExporter.enabled=false
         else
           helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             -n monitoring \
             --create-namespace \
-            --set nodeExporter.enabled=false \
-            --set grafana.admin.user=${{ secrets.GRAFANA_ADMIN_USER }} \
-            --set grafana.admin.password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+            --set nodeExporter.enabled=false
         fi
+
+    - name: Force reset Grafana credentials
+      run: |
+        # 等待 Grafana 启动
+        sleep 30
+        
+        # 删除现有的 Secret
+        kubectl delete secret kube-prometheus-stack-grafana -n monitoring --ignore-not-found=true
+        
+        # 使用 kubectl 手动创建包含正确凭据的 Secret
+        kubectl create secret generic kube-prometheus-stack-grafana \
+          -n monitoring \
+          --from-literal=admin-user="${{ secrets.GRAFANA_ADMIN_USER }}" \
+          --from-literal=admin-password="${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+        
+        # 重启 Grafana 以使用新凭据
+        kubectl rollout restart deployment kube-prometheus-stack-grafana -n monitoring
+        sleep 30
+
+    - name: Verify Grafana credentials
+      run: |
+        echo "=== 验证 Grafana 凭据 ==="
+        echo "Secret 中的用户名:"
+        kubectl get secret kube-prometheus-stack-grafana -n monitoring -o jsonpath='{.data.admin-user}' | base64 --decode && echo
+        echo "Secret 中的密码:"
+        kubectl get secret kube-prometheus-stack-grafana -n monitoring -o jsonpath='{.data.admin-password}' | base64 --decode && echo
+        echo "GitHub Secrets 中的用户名: ${{ secrets.GRAFANA_ADMIN_USER }}"
+        echo "GitHub Secrets 中的密码长度: ${#{{ secrets.GRAFANA_ADMIN_PASSWORD }}} 字符"
 
     - name: Clean up existing Node Exporter
       run: |
@@ -155,7 +183,15 @@ jobs:
         echo "📈 Grafana: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/grafana"
         echo "🚨 Alertmanager: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/alertmanager"
         echo ""
+        echo "Grafana登录凭据:"
+        echo "用户名: ${{ secrets.GRAFANA_ADMIN_USER }}"
+        echo "密码: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}"
+        echo ""
+        echo "如果仍然无法登录，请检查:"
+        echo "1. GitHub Secrets 中的 GRAFANA_ADMIN_USER 和 GRAFANA_ADMIN_PASSWORD 是否正确设置"
+        echo "2. 密码是否包含特殊字符"
+        echo "3. 可以尝试使用以下命令手动验证:"
+        echo "   kubectl get secret kube-prometheus-stack-grafana -n monitoring -o jsonpath='{.data.admin-password}' | base64 --decode"
+        echo ""
         echo "Node Exporter Status:"
         kubectl get pods -n monitoring -l app.kubernetes.io/name=node-exporter
-        echo ""
-        echo "Grafana凭据请查看GitHub Secrets"
