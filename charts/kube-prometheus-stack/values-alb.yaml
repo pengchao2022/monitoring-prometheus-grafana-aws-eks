@@ -7,11 +7,7 @@ grafana:
   enabled: true
   replicaCount: 1
   deploymentStrategy:
-    type: Recreate  
-  # 使用GitHub Secrets中的凭据（通过--set参数覆盖）
-  admin:
-    user: "admin"  # 默认值，会被GitHub Actions中的--set覆盖
-    password: "temp-password"  # 默认值，会被GitHub Actions中的--set覆盖
+    type: Recreate
   
   # 优化镜像配置
   image:
