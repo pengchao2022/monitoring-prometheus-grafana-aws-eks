@@ -71,10 +71,10 @@ grafana:
   # 大幅减少资源请求
   resources:
     requests:
-      memory: "256Mi"
+      memory: "128Mi"
       cpu: "200m"
     limits:
-      memory: "512Mi"
+      memory: "256Mi"
       cpu: "400m"
 
 # Prometheus 配置 - 最小化资源
@@ -112,10 +112,10 @@ prometheus:
     # 大幅减少资源请求
     resources:
       requests:
-        memory: "256Mi"
+        memory: "128Mi"
         cpu: "200m"
       limits:
-        memory: "512Mi"
+        memory: "256Mi"
         cpu: "250m"
     
     # 简化服务发现
@@ -234,10 +234,10 @@ defaultRules:
 prometheusOperator:
   resources:
     requests:
-      memory: "128Mi"
+      memory: "64Mi"
       cpu: "100m"
     limits:
-      memory: "256Mi"
+      memory: "128Mi"
       cpu: "200m"
 
   # 启用 admission webhook 以解决 TLS secret 问题
