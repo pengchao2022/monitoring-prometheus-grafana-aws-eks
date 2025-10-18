@@ -34,12 +34,12 @@ grafana:
       - ReadWriteOnce
     storageClassName: gp2
   
-  # 启用sidecar自动加载数据源和仪表板
+  # 关键修改：禁用sidecar自动加载数据源和仪表板
   sidecar:
     dashboards:
-      enabled: true
+      enabled: false  # 改为 false
     datasources:
-      enabled: true
+      enabled: false  # 改为 false
   
   # 预配置数据源
   datasources:
@@ -251,10 +251,10 @@ prometheusOperator:
       resources:
         requests:
           memory: "64Mi"
-          cpu: "10m"
+          cpu: "100m"
         limits:
           memory: "128Mi"
-          cpu: "25m"
+          cpu: "250m"
 
 # 额外配置 - 确保节点选择器生效
 extraObjects: []
