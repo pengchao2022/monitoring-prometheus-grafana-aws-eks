@@ -7,6 +7,7 @@ spec:
   podSelector: {}
   policyTypes:
   - Ingress
+  - Egress
   ingress:
   # 合并所有来源，使用相同的端口规则
   - from:
@@ -26,4 +27,40 @@ spec:
     - port: 9093  # Alertmanager
       protocol: TCP
     - port: 9100  # Node Exporter
+      protocol: TCP
+  egress:
+  # 允许访问 DNS（必需）
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  # 允许访问外部网络下载 Dashboard 模板
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - port: 443  # HTTPS
+      protocol: TCP
+    - port: 80   # HTTP
+      protocol: TCP
+  # 允许集群内部通信
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - port: 3000  # Grafana
+      protocol: TCP
+    - port: 9090  # Prometheus
+      protocol: TCP
+    - port: 9093  # Alertmanager
+      protocol: TCP
+    - port: 9100  # Node Exporter
+      protocol: TCP
+    - port: 10250 # Kubelet
+      protocol: TCP
+    - port: 443   # Kubernetes API
       protocol: TCP
