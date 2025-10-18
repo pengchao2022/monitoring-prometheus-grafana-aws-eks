@@ -41,11 +41,11 @@ grafana:
   # 大幅减少资源请求
   resources:
     requests:
-      memory: "128Mi"
-      cpu: "50m"
-    limits:
       memory: "256Mi"
       cpu: "200m"
+    limits:
+      memory: "512Mi"
+      cpu: "400m"
 
 # Prometheus 配置 - 最小化资源
 prometheus:
@@ -75,11 +75,11 @@ prometheus:
     # 大幅减少资源请求
     resources:
       requests:
-        memory: "64Mi"
-        cpu: "25m"
+        memory: "256Mi"
+        cpu: "200m"
       limits:
-        memory: "128Mi"
-        cpu: "100m"
+        memory: "512Mi"
+        cpu: "250m"
     
     # 简化服务发现
     serviceMonitorSelectorNilUsesHelmValues: false
@@ -109,11 +109,11 @@ alertmanager:
     # 大幅减少资源请求
     resources:
       requests:
-        memory: "64Mi"
-        cpu: "25m"
-      limits:
         memory: "128Mi"
         cpu: "100m"
+      limits:
+        memory: "256Mi"
+        cpu: "200m"
 
 # 禁用非核心组件以加快部署
 kubeEtcd:
