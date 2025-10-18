@@ -47,6 +47,52 @@ grafana:
       memory: "512Mi"
       cpu: "400m"
 
+  # 添加 dashboard provisioning 配置
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 10
+        allowUiUpdates: true
+        options:
+          path: /var/lib/grafana/dashboards
+
+  # 添加 volume 挂载配置
+  extraVolumes:
+    - name: grafana-dashboards
+      configMap:
+        name: grafana-kubernetes-cluster-dashboard
+    - name: grafana-dashboard-provisioning
+      configMap:
+        name: grafana-dashboard-provisioning
+
+  extraVolumeMounts:
+    - name: grafana-dashboards
+      mountPath: /var/lib/grafana/dashboards
+    - name: grafana-dashboard-provisioning
+      mountPath: /etc/grafana/provisioning/dashboards
+
+  # 预配置仪表板
+  dashboards:
+    default:
+      kubernetes-cluster-monitoring:
+        gnetId: 3119
+        revision: 1
+        datasource: Prometheus
+      node-monitoring:
+        gnetId: 6417
+        revision: 1
+        datasource: Prometheus
+      kubernetes-pod-monitoring:
+        gnetId: 315
+        revision: 1
+        datasource: Prometheus
+
 # Prometheus 配置 - 最小化资源
 prometheus:
   enabled: true
