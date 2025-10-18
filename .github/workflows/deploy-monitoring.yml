@@ -20,29 +20,6 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: Debug - Check files in workspace
-      run: |
-        echo "=== 当前工作目录文件 ==="
-        pwd
-        ls -la
-        echo ""
-        echo "=== 检查监控配置文件 ==="
-        find . -name "*.yaml" -o -name "*.yml" | head -10
-        echo ""
-        echo "=== 检查kubernetes目录结构 ==="
-        if [ -d "kubernetes" ]; then
-          echo "kubernetes目录存在"
-          find kubernetes/ -name "*.yaml" -o -name "*.yml"
-        fi
-        echo ""
-        echo "=== 检查charts目录 ==="
-        if [ -d "charts" ]; then
-          echo "charts目录存在"
-          ls -la charts/kube-prometheus-stack/
-        fi
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
@@ -61,9 +38,18 @@ jobs:
       run: |
         aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
 
+    - name: Clean up existing resources
+      run: |
+        helm uninstall kube-prometheus-stack -n monitoring --ignore-not-found=true
+        kubectl delete job kube-prometheus-stack-admission-patch -n monitoring --ignore-not-found=true
+
     - name: Create monitoring namespace
       run: |
         kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Create missing ServiceAccount
+      run: |
+        kubectl apply -f kubernetes/serviceaccount/admission-serviceaccount.yaml -n monitoring
 
     - name: Add prometheus-community helm repository
       run: |
@@ -72,144 +58,74 @@ jobs:
 
     - name: Install kube-prometheus-stack with custom values
       run: |
-        echo "=== 使用Helm安装kube-prometheus-stack（禁用node-exporter）==="
-        
         if [ -f "charts/kube-prometheus-stack/values-alb.yaml" ]; then
-          echo "使用自定义values-alb.yaml文件安装（禁用node-exporter）..."
           helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             -n monitoring \
             --create-namespace \
             -f charts/kube-prometheus-stack/values-alb.yaml \
-            --set nodeExporter.enabled=false
+            --set nodeExporter.enabled=false \
+            --set grafana.adminPassword=${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         else
-          echo "使用默认配置安装（禁用node-exporter）..."
           helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             -n monitoring \
             --create-namespace \
-            --set nodeExporter.enabled=false
+            --set nodeExporter.enabled=false \
+            --set grafana.adminPassword=${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         fi
 
     - name: Clean up existing Node Exporter
       run: |
-        echo "=== 清理现有的Node Exporter ==="
-        # 删除Helm可能创建的node-exporter
         kubectl delete daemonset kube-prometheus-stack-prometheus-node-exporter -n monitoring --ignore-not-found=true
-        # 删除pending的pods
         kubectl delete pod -n monitoring -l app.kubernetes.io/name=prometheus-node-exporter --ignore-not-found=true
 
     - name: Deploy custom Node Exporter
       run: |
-        echo "=== 部署您本地的Node Exporter DaemonSet ==="
-        
-        if [ -f "kubernetes/node-exporter/daemonset-limited.yaml" ]; then
-          echo "部署您本地的Node Exporter..."
-          kubectl apply -f kubernetes/node-exporter/daemonset-limited.yaml -n monitoring
-          echo "✅ 本地Node Exporter部署完成"
-        else
-          echo "❌ 本地daemonset-limited.yaml文件不存在"
-          exit 1
-        fi
+        kubectl apply -f kubernetes/node-exporter/daemonset-limited.yaml -n monitoring
 
     - name: Deploy additional Kubernetes manifests
       run: |
-        echo "=== 部署额外的Kubernetes清单文件 ==="
-        
-        # 部署network policies
         if [ -f "kubernetes/network-policies/monitoring-network-policy.yaml" ]; then
-          echo "部署网络策略..."
-          kubectl apply -f kubernetes/network-policies/monitoring-network-policy.yaml -n monitoring || echo "NetworkPolicy部署失败，跳过"
+          kubectl apply -f kubernetes/network-policies/monitoring-network-policy.yaml -n monitoring || true
         fi
-        
-        # 部署Ingress资源 - 使用您本地的Ingress文件
-        echo "部署Ingress资源..."
         kubectl apply -f kubernetes/ingress/ -n monitoring
 
     - name: Wait for ALB and get address
       id: get_elb
       run: |
-        echo "等待ALB创建..."
         sleep 60
-        
-        # 检查所有资源状态
-        echo "=== 检查部署状态 ==="
-        kubectl get pods,svc,ingress -n monitoring
-        
-        # 获取ELB地址
         ELB_ADDRESS=$(kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
-        
         if [ -z "$ELB_ADDRESS" ]; then
-          echo "❌ 无法获取ELB地址，等待重试..."
           sleep 30
           ELB_ADDRESS=$(kubectl get ingress -n monitoring -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
         fi
-        
         echo "ELB_ADDRESS=$ELB_ADDRESS" >> $GITHUB_OUTPUT
-        echo "ELB地址: $ELB_ADDRESS"
 
     - name: Configure Grafana for subpath support
       run: |
-        echo "=== 配置Grafana支持子路径 ==="
-        
         ELB_ADDRESS="${{ steps.get_elb.outputs.ELB_ADDRESS }}"
-        
         if [ -n "$ELB_ADDRESS" ]; then
-          echo "配置Grafana使用ALB地址: $ELB_ADDRESS"
-          
-          # 使用正确的URL格式，避免%符号问题
           kubectl patch configmap kube-prometheus-stack-grafana -n monitoring --type=merge \
             --patch '{"data":{"grafana.ini":"[server]\ndomain = '"$ELB_ADDRESS"'\nroot_url = http://'"$ELB_ADDRESS"'/grafana/\nserve_from_sub_path = true\n"}}'
-          
-          # 重启Grafana
-          echo "重启Grafana Pod..."
           kubectl rollout restart deployment kube-prometheus-stack-grafana -n monitoring
-          
-          # 等待重启
-          echo "等待Grafana重启..."
           sleep 60
-          
-          # 检查状态和日志
-          echo "Grafana Pod状态:"
-          kubectl get pod -n monitoring -l app.kubernetes.io/name=grafana
-          
-          echo "Grafana Pod日志:"
-          kubectl logs -n monitoring -l app.kubernetes.io/name=grafana --tail=10
-          
-          echo "✅ Grafana子路径配置完成"
-        else
-          echo "❌ 无法获取ELB地址，跳过Grafana配置"
         fi
 
     - name: Update Prometheus and Alertmanager external URLs
       run: |
-        echo "=== 更新Prometheus和Alertmanager的外部URL ==="
-        
         ELB_ADDRESS="${{ steps.get_elb.outputs.ELB_ADDRESS }}"
-        
         if [ -n "$ELB_ADDRESS" ]; then
-          # 更新Prometheus externalUrl
           kubectl get prometheus kube-prometheus-stack-prometheus -n monitoring && \
           kubectl patch prometheus kube-prometheus-stack-prometheus -n monitoring --type='merge' \
-            -p='{"spec":{"externalUrl":"http://'$ELB_ADDRESS'/prometheus","routePrefix":"/prometheus"}}' || \
-          echo "Prometheus资源不存在，跳过"
-          
-          # 更新Alertmanager externalUrl
+            -p='{"spec":{"externalUrl":"http://'$ELB_ADDRESS'/prometheus","routePrefix":"/prometheus"}}' || true
           kubectl get alertmanager kube-prometheus-stack-alertmanager -n monitoring && \
           kubectl patch alertmanager kube-prometheus-stack-alertmanager -n monitoring --type='merge' \
-            -p='{"spec":{"externalUrl":"http://'$ELB_ADDRESS'/alertmanager","routePrefix":"/alertmanager"}}' || \
-          echo "Alertmanager资源不存在，跳过"
-          
-          echo "✅ 外部URL更新完成"
-        else
-          echo "❌ 无法获取ELB地址，跳过URL更新"
+            -p='{"spec":{"externalUrl":"http://'$ELB_ADDRESS'/alertmanager","routePrefix":"/alertmanager"}}' || true
         fi
 
     - name: Restart monitoring services
       run: |
-        echo "=== 重启监控服务以应用配置 ==="
-        # 重启Prometheus（如果存在）
-        kubectl delete pod -n monitoring -l app.kubernetes.io/name=prometheus --ignore-not-found=true || echo "没有Prometheus Pod"
-        # 重启Alertmanager（如果存在）
-        kubectl delete pod -n monitoring -l app.kubernetes.io/name=alertmanager --ignore-not-found=true || echo "没有Alertmanager Pod"
+        kubectl delete pod -n monitoring -l app.kubernetes.io/name=prometheus --ignore-not-found=true || true
+        kubectl delete pod -n monitoring -l app.kubernetes.io/name=alertmanager --ignore-not-found=true || true
         sleep 30
 
     - name: Output access information
@@ -226,23 +142,4 @@ jobs:
         echo "📈 Grafana: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/grafana"
         echo "🚨 Alertmanager: http://${{ steps.get_elb.outputs.ELB_ADDRESS }}/alertmanager"
         echo ""
-        echo "Grafana默认凭据："
-        echo "用户名: admin"
-        echo "密码: prom-operator"
-        echo ""
-        echo "如果Grafana页面显示空白，请等待几分钟让配置生效"
-
-    - name: Final verification
-      run: |
-        echo "=== 最终验证 ==="
-        echo "=== Pod状态 ==="
-        kubectl get pods -n monitoring -o wide
-        echo ""
-        echo "=== Node Exporter分布 ==="
-        kubectl get pods -n monitoring -l app=node-exporter-limited -o wide
-        echo ""
-        echo "=== Ingress详情 ==="
-        kubectl get ingress -n monitoring -o wide
-        echo ""
-        echo "=== Grafana配置检查 ==="
-        kubectl get configmap kube-prometheus-stack-grafana -n monitoring -o jsonpath='{.data.grafana\.ini}' | grep -A 3 "\\[server\\]"
+        echo "Grafana凭据请查看GitHub Secrets"
